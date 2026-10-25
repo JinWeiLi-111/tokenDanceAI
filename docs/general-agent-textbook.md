@@ -834,9 +834,9 @@ mcp/
 
 ```python
 # agents/graph.py
+from langchain.agents import create_agent  # 注意：langchain.agents，不是 langgraph.prebuilt
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from langgraph.prebuilt import create_react_agent
 
 SYSTEM_PROMPT = """You are a general-purpose autonomous assistant.
 You have tools from connected MCP servers. To publish a blog post,
@@ -847,8 +847,20 @@ asks to review first. Be concise."""
 async def build_agent(llm: BaseChatModel, tools: list[BaseTool],
                       system_prompt: str = SYSTEM_PROMPT):
     """tools 由 MCPRegistry.get_tools(user) 提供。"""
-    return create_react_agent(llm, tools, prompt=system_prompt)
+    return create_agent(model=llm, tools=tools, system_prompt=system_prompt)
 ```
+
+> **API 变更**：旧的 `langgraph.prebuilt.create_react_agent` 在 langgraph 1.x 已
+> **废弃**（docstring 明确写着 deprecated in favor of `langchain.agents.create_agent`）。
+> 迁移要点：
+>
+> - 入口从 `langgraph.prebuilt` 挪到 `langchain.agents`；
+> - `prompt=` 参数改名为 `system_prompt=`（旧的 `prompt` 还能用但语义变成 state modifier，
+>   传字符串虽兼容但建议直接用 `system_prompt`）；
+> - 新增 `middleware=()` 中间件系统，可以在 model 前后拦截改写 state（替代旧的
+>   `pre_model_hook` / `post_model_hook` / `state_modifier` 的一堆零散参数）。
+>   v1 不需要 middleware，留个概念，后续要注入运行时 context（如当前 user/db）时再用。
+> 迁移指南见官方 [Migrating from LangGraph v1](https://docs.langchain.com/oss/python/migrate/langgraph-v1)。
 
 ### 10.1 不再需要 context_schema
 
