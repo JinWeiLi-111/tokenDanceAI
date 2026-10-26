@@ -12,5 +12,15 @@
       "source.organizeImports.ruff": "explicit"
     }
   },
-  "editor.defaultFormatter": "charliermarsh.ruff"
+  "editor.defaultFormatter": "charliermarsh.ruff",
+  "python.languageServer": "Pylance",
+  "python.analysis.indexing": true,
+  "python.analysis.autoImportCompletions": true, // 敲符号名时列出"来自哪个包"的导入建议（核心）
+  "python.analysis.packageIndexDepths": [ // 加深对已安装包的符号索引深度
+    {
+      "name": "",
+      "depth": 5,
+      "includeAllSymbols": true
+    }
+  ]
 }

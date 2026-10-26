@@ -11,20 +11,7 @@ from mcp import ClientSession
 from tokendanceai.mcp.bridge import wrap_mcp_tools
 from tokendanceai.mcp.client import connect_http, connect_sse
 from tokendanceai.models.model import MCPServerConfig
-
-# TODO(token 解密): encrypted_api_token 是 Fernet 加密存的，解密要放
-# mcp/config.py（教材 9.4）。需 uv add cryptography + Settings.token_encryption_key。
-# 解出来才是 connect_http/sse 用的 Bearer token。
-
-
-def _decrypt_token(encrypted: str | None) -> str | None:
-    """解密 MCPServerConfig.encrypted_api_token → 明文 Bearer token。
-
-    占位实现：没有 token 直接返回 None；有 token 时先抛错，逼着把 mcp/config.py 补上。
-    """
-    if not encrypted:
-        return None
-    raise NotImplementedError("token 解密未实现，见 mcp/config.py（教材 9.4）")
+from tokendanceai.utils.crypto import decrypt
 
 
 @dataclass
@@ -57,6 +44,7 @@ class MCPRegistry:
         tools: list[BaseTool] = []
         for cfg in server_configs:
             if not cfg.enabled:
+                # soft delete
                 continue
             live = await self._get_or_build(user_id, cfg)
             tools.extend(live.tools_cache)
@@ -80,7 +68,7 @@ class MCPRegistry:
         """按cfg.transport建连，用 AsyncExitStack 持有，让 session 长生命周期存活"""
         stack = AsyncExitStack()
         try:
-            token = _decrypt_token(cfg.encrypted_api_token)
+            token = decrypt(cfg.encrypted_api_token)
             assert token
             if cfg.transport == "http":
                 session = await stack.enter_async_context(

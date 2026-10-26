@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from tokendanceai.db.base import Base
 
@@ -19,6 +19,15 @@ class User(Base):
         String(200), nullable=True, default=None
     )
 
+    # lazy="joined" 查 User 时 JOIN 一次拉出 config，省第二条 SQL。
+    # uselist=False 表示标量关系而非列表。
+    llm_config: Mapped["UserLLMConfig | None"] = relationship(
+        back_populates="user",
+        uselist=False,
+        lazy="joined",
+        cascade="all, delete-orphan",
+    )
+
 
 class UserLLMConfig(Base):
     # private LLM config for per user
@@ -28,6 +37,8 @@ class UserLLMConfig(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey(User.id), unique=True, nullable=False, index=True
     )
+    # 反向引用，从 config 也能 config.user 拿到属主。
+    user: Mapped["User"] = relationship(back_populates="llm_config")
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     base_url: Mapped[str] = mapped_column(String(255), nullable=False)
     model: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -66,7 +77,7 @@ class Session(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(
-        ForeignKey(User.id), unique=True, nullable=False, index=True
+        ForeignKey(User.id), nullable=False, index=True
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -80,11 +91,11 @@ class Session(Base):
 
 
 class Message(Base):
-    __tablename__ = "message"
+    __tablename__ = "messages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     session_id: Mapped[int] = mapped_column(
-        ForeignKey(Session.id), unique=True, nullable=False, index=True
+        ForeignKey(Session.id), nullable=False, index=True
     )
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text)

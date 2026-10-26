@@ -62,7 +62,7 @@ class MCPToolWrapper(BaseTool):
     session: ClientSession
 
     def _run(self, **kwargs: Any) -> Any:
-        raise NotImplementedError("MCP tools are async-only. use ainvoke()")
+        raise NotImplementedError("MCP tools are async-only. please use ainvoke()")
 
     async def _arun(self, **kwargs: Any) -> Any:
         result = await self.session.call_tool(self.mcp_name, kwargs)
