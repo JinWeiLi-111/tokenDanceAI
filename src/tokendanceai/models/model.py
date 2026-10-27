@@ -47,7 +47,7 @@ class UserLLMConfig(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
-    Update_at: Mapped[datetime] = mapped_column(
+    update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
@@ -84,7 +84,7 @@ class Session(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
-    Update_at: Mapped[datetime] = mapped_column(
+    update_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
     )
