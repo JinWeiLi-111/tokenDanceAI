@@ -26,3 +26,8 @@ class UserPublic(UserBase):
 
 class UserPrivate(UserPublic):
     email: EmailStr = Field(..., max_length=120)
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str

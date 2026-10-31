@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from fastapi import FastAPI
 from langchain_core.tools import BaseTool
 from mcp import ClientSession
 
@@ -94,3 +95,26 @@ class MCPRegistry:
         for k in keys:
             await self._clients[k].close()
             del self._clients[k]
+
+
+_registry: MCPRegistry | None = None
+
+
+def get_registry() -> MCPRegistry:
+    # 由于获取MCP Registry不涉及io或者网络操作，直接只有同步函数即可
+    if _registry is None:
+        raise RuntimeError("MCP Registry 未初始化，lifespan 启动失败")
+    return _registry
+
+
+async def mcp_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    global _registry
+    _registry = MCPRegistry(cache_ttl=300)
+    try:
+        yield
+    finally:
+        if _registry is not None:
+            for live in _registry._clients.values():
+                await live.close()
+            _registry._clients.clear()
+            _registry = None
