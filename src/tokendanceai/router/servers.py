@@ -57,7 +57,7 @@ async def create_mcp_server(
         name=data.name,
         url=data.url,
         transport=data.transport,
-        encrypt_api_token=encrypt_token,
+        encrypted_api_token=encrypt_token,
     )
 
     db.add(server)

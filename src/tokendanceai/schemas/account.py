@@ -18,4 +18,4 @@ class AccountPublic(BaseModel):
     base_url: str
     model: str
     created_at: datetime
-    updated_at: datetime
+    update_at: datetime

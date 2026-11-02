@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +16,7 @@ router = APIRouter()
 @router.get("", response_model=AccountPublic)
 async def get_account(
     current_user: CurrentUser,
-    db: Annotated[AsyncSession, get_db],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """get the llm config of current_user"""
     llm_config: UserLLMConfig | None = (
@@ -41,7 +41,7 @@ async def get_account(
 async def upsert_account(
     data: AccountUpsert,
     current_user: CurrentUser,
-    db: Annotated[AsyncSession, get_db],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     encrypt_api_key = encrypt(data.api_key)
     llm_config: UserLLMConfig | None = current_user.llm_config
@@ -53,7 +53,7 @@ async def upsert_account(
             provider=data.provider,
             base_url=data.base_url,
             model=data.model,
-            encrypt_api_key=encrypt_api_key,
+            encrypted_api_key=encrypt_api_key,
         )
     else:
         llm_config.provider = data.provider

@@ -21,7 +21,8 @@ class UserPublic(UserBase):
     id: int
     username: str = Field(..., min_length=1, max_length=50)
     image_file: str | None = None
-    image_path: str
+    # User 模型当前没有 image_path 列；留默认值，避免响应序列化时缺失属性报错
+    image_path: str | None = None
 
 
 class UserPrivate(UserPublic):

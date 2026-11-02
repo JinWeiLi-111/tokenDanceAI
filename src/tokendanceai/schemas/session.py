@@ -9,7 +9,7 @@ class SessionPublic(BaseModel):
     user_id: int
     title: str
     create_at: datetime
-    updated_at: datetime
+    update_at: datetime
 
 
 class MessagePublic(BaseModel):

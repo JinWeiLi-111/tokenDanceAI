@@ -1,0 +1,72 @@
+/* ─── Servers / Account pages ───────────────────────────────────── */
+/* servers list rows */
+.server-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s3);
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--s3) 0;
+}
+.server-row:last-child { border-bottom: none; }
+.server-row__main { min-width: 0; }
+.server-row__name { font-size: 0.95rem; font-weight: 500; color: var(--text); display: flex; align-items: center; gap: var(--s2); }
+.server-row__url {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-row__meta { display: flex; gap: var(--s2); margin-top: var(--s1); align-items: center; }
+.server-row__actions { display: flex; gap: var(--s1); align-items: center; flex-shrink: 0; }
+
+/* toggle switch (enabled) */
+.toggle {
+  position: relative;
+  width: 34px; height: 18px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 150ms ease;
+  flex-shrink: 0;
+}
+.toggle.is-on { background: var(--accent); }
+.toggle__thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 150ms ease;
+}
+.toggle.is-on .toggle__thumb { transform: translateX(16px); }
+
+/* test result panel */
+.server-test {
+  margin-top: var(--s2);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  padding: var(--s2) var(--s3);
+  font-size: 0.82rem;
+}
+.server-test.is-err { border-left-color: var(--danger); }
+.server-test__title { font-weight: 500; color: var(--text); margin-bottom: var(--s1); }
+.server-test__tools { display: flex; flex-direction: column; gap: var(--s1); }
+.tool-line { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+.tool-line__name { color: var(--accent); }
+.tool-line__desc { color: var(--text-faint); }
+
+/* inline form (create / edit) */
+.form-inline {
+  border: 1px dashed var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s4);
+  margin-bottom: var(--s4);
+  background: var(--bg);
+}
+.form-inline__row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+@media (max-width: 760px) { .form-inline__row { grid-template-columns: 1fr; } }
+.form-inline__actions { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s2); }

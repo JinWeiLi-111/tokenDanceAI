@@ -1,0 +1,17 @@
+/* ─── Account (LLM config) page ─────────────────────────────────── */
+.account-form { max-width: 560px; }
+.account-form .field__input[multiple],
+.account-form select { cursor: pointer; }
+.account-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: var(--s4);
+}
+.account-status__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--warn);
+}
+.account-status.is-ok .account-status__dot { background: var(--accent); }
