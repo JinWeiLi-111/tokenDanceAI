@@ -36,6 +36,8 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
     "ruff>=0.17.1",
 ]
 
@@ -47,3 +49,9 @@ select = ["E", "F", "I"]   # pycodestyle + pyflakes + isort
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"          # 关键：让所有 async def 测试自动被当协程跑，不用每个都加 @pytest.mark.asyncio
+testpaths = ["tests"]           # 测试都放 tests/ 目录
+pythonpath = ["src"]            # 让测试能 import tokendanceai（项目用 src-layout）
+addopts = "-v --tb=short"       # 默认详细输出 + 精简 traceback

@@ -18,7 +18,6 @@ class User(Base):
     image_file: Mapped[str | None] = mapped_column(
         String(200), nullable=True, default=None
     )
-
     # lazy="joined" 查 User 时 JOIN 一次拉出 config，省第二条 SQL。
     # uselist=False 表示标量关系而非列表。
     llm_config: Mapped["UserLLMConfig | None"] = relationship(
@@ -27,6 +26,7 @@ class User(Base):
         lazy="joined",
         cascade="all, delete-orphan",
     )
+    is_admin: Mapped[bool] = mapped_column(default=False, nullable=False)
 
 
 class UserLLMConfig(Base):
@@ -37,7 +37,7 @@ class UserLLMConfig(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey(User.id), unique=True, nullable=False, index=True
     )
-    # 反向引用，从 config 也能 config.user 拿到属主。
+    # 反向引用，从 config 也能 config.user 拿到属性对应的用户。
     user: Mapped["User"] = relationship(back_populates="llm_config")
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     base_url: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -101,8 +101,8 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text)
-    tool_calls_json: Mapped[str] = mapped_column(Text)
-    tool_results_json: Mapped[str] = mapped_column(Text)
+    tool_calls_json: Mapped[str] = mapped_column(Text, nullable=True)
+    tool_results_json: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

@@ -97,4 +97,19 @@ async def get_current_user(
     return user
 
 
+async def get_current_admin_user(
+    current_user: Annotated[models.User, Depends(get_current_user)],
+) -> models.User:
+    """return admin user"""
+    if not current_user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Need Admin Authrization",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return current_user
+
+
 CurrentUser = Annotated[models.User, Depends(get_current_user)]
+CurrentAdmin = Annotated[models.User, Depends(get_current_admin_user)]
