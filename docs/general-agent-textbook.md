@@ -4,8 +4,8 @@
 >
 > | 项 | 值 |
 > |---|---|
-> | 文档版本 | v2（接口层补全） |
-> | 状态 | 实现中（agent 核心已落地，接口层设计完成待实现） |
+> | 文档版本 | v3（MCP 原始 JSON Schema 契约与测试边界同步） |
+> | 状态 | MCP 桥契约已更新；真实 SDK 跨任务生命周期与并发架构仍待加固 |
 > | 适用系统 | `tokendanceai`（FastAPI + langgraph + MCP） |
 > | 目标读者 | 后端 / 平台工程师，需具备 Python async、FastAPI、LLM 应用基础 |
 > | 关联代码 | `src/tokendanceai/`（本文所有代码片段均对照真实实现） |
@@ -67,8 +67,8 @@
 
 | 维度 | 用 adapters 包 | 自己写桥（本文档选择） |
 |---|---|---|
-| 代码量 | 几乎为零 | ~50 行桥 + ~60 行 registry |
-| 连接生命周期掌控 | 黑盒 | 完全掌控（per-user 缓存、TTL、invalidate） |
+| 代码量 | 几乎为零 | 桥 + registry（含显式 schema 校验和局部清理） |
+| 连接生命周期掌控 | 由包管理 | 自行实现缓存/TTL/invalidate；任务所有权与并发仍待解决 |
 | 协议理解 | 不需要懂 | 吃透 JSON Schema、transport、session 握手 |
 | 边界情况（重连、协议版本、schema 兼容） | 包已踩过坑 | 自己踩 |
 
@@ -188,7 +188,6 @@ src/tokendanceai/
     bridge.py             # MCP tool → LangChain BaseTool 的桥（第 7 章）
     client.py             # 三种 transport：connect_http/sse/stdio（第 8 章）
     registry.py           # per-user MCP client 缓存 + TTL（第 9 章）
-    config.py             # token 解密：encrypted_api_token → Bearer（待补，见 9.4）
   agents/                 # ★ 编排层（不碰业务）
     graph.py              # build_agent(llm, tools, system_prompt)（第 10 章）
     runner.py             # run_agent() → SSE 事件流（第 11 章）
@@ -197,7 +196,7 @@ src/tokendanceai/
     llm_service.py        # build_chat_model（第 10 章 10.2）
 ```
 
-> 两个 `config.py` 不冲突：根目录 `config.py` 是全局 `Settings`；`mcp/config.py` 是 MCP 子域的配置转换（token 解密）。按就近原则各管各的。
+> 根目录 `config.py` 管全局 Settings；MCP token 解密直接复用 `utils/crypto.py`，当前没有必须新增的 `mcp/config.py`。
 
 ### 2.2 分层与依赖方向
 
@@ -274,7 +273,7 @@ settings = Settings()  # type: ignore  # 字段从 .env 注入
 - **一把钥匙加密两种凭据**：LLM key 和 MCP token 共用 `ai_encryption_key`（见 [utils/crypto.py](../src/tokendanceai/utils/crypto.py)），不为每种凭据单独开钥匙。简单、够用；要做密钥轮转时再引入 key-id。
 - **不给 config 开文件夹**：它是横切单例，不是领域对象。一个领域才配一个包；config 开包反而让「到底 import 哪个 Settings」变模糊。
 
-> **待对齐**：本文档多处引用 `settings.mcp_cache_ttl`（registry TTL）和 `settings.mcp_request_timeout`（tool 调用超时，见[附录 A](#appendix-a)）。真实 `Settings` 里还没有这两个字段，落地时补上（都给默认值，分别 `300` / `30`）。
+> **可选配置加固**：当前 registry 的 `cache_ttl` 通过构造参数传入（默认 `300`），桥没有新增调用超时包装。后续如集中配置，可给 Settings 增加 TTL/超时字段；不能将建议配置写成已经实现的行为。
 
 ---
 
@@ -612,7 +611,7 @@ MCP（Model Context Protocol）是 Anthropic 提出的开放协议，让 LLM 客
 | 进程内 tool（blog 现状） | 最高 | 进程内 context | 编译期硬编码 | 无法跨进程、业务膨胀 |
 | 自定义 HTTP RPC | 中 | 自己设计 | 自己设计 | 每个 server 协议不一，重复造轮子 |
 | OpenAPI + 代码生成 | 中 | 标准 | 靠 spec | tool 语义/描述不是为 LLM 设计的 |
-| **MCP** | **最低** | **标准 header** | **运行时 `list_tools`** | 需要写一层桥（~50 行） |
+| **MCP** | **最低** | **标准 header** | **运行时 `list_tools`** | 需包装、显式参数校验与连接管理 |
 
 MCP 的决定性优势：它是**专为 LLM tool-calling 设计**的协议——tool 自带给模型看的 `description` 和 `inputSchema`，`list_tools` 让发现发生在运行时而非编译时。这正好命中 [G2/G3](#ch-1)（可插拔 + 运行时发现）。代价是 SDK 返回的类型和 LangChain 不兼容，需要一层桥（第 6–7 章）。
 
@@ -623,16 +622,16 @@ MCP 的决定性优势：它是**专为 LLM tool-calling 设计**的协议——
 只用官方 SDK，不装 adapters 包：
 
 ```bash
-uv add mcp langgraph langchain langchain-openai langchain-anthropic
+uv add mcp langgraph langchain langchain-openai langchain-anthropic jsonschema referencing
 ```
 
-**为什么不装 `langchain-mcp-adapters`**：这是一个架构决策，不是偷懒。
+**为什么不装 `langchain-mcp-adapters`**：这是架构取舍，不是偷懒。
 
-- **可控性**：自己写的桥（第 7 章）~50 行，行为完全可预测；adapters 包封装了连接生命周期，和我们要的 per-user TTL 缓存（第 9 章）打架。
-- **学习价值**：吃透「MCP 类型 → LangChain 类型」的映射，是看懂整个系统的前提。
+- **可控性**：参数、调用、结果三段契约都由自己显式维护，per-user TTL / invalidate 也握在手里（连接生命周期的边界见 [9.3](#ch-9-limits)）。
+- **学习价值**：吃透原始 JSON Schema 如何保真传递、显式校验，以及 SDK 的调用与结果如何接到 `BaseTool`。
 - **依赖面**：少一个第三方包，少一处版本锁和潜在的 breaking change。
 
-代价是自己维护桥的 ~50 行；对一个以 MCP 为核心的系统，这 50 行本就该是自己的核心资产。
+代价是参数契约、SDK 兼容性和连接生命周期都得自己扛。
 
 ---
 
@@ -641,155 +640,164 @@ uv add mcp langgraph langchain langchain-openai langchain-anthropic
 
 ### 6.1 桥要解决的根本问题
 
-MCP SDK 返回的 tool 和 langgraph 要的 tool 接口不兼容——这不是版本问题，是**协议设计哲学不同**：
+MCP SDK 的 tool 与 LangChain 的 tool **调用接口、结果结构不同，但参数契约可以共享原始 JSON Schema**。当前 LangChain `BaseTool.args_schema` 支持 Pydantic 模型类，也支持 JSON Schema `dict`；MCP 桥选择后者，不再反向生成 Python 参数模型。
 
 ```
-  MCP SDK 侧                         LangChain / langgraph 侧
-  ─────────────                      ──────────────────────
-  mcp.types.Tool                     langchain_core.tools.BaseTool
-   ├─ name: str                       ├─ name: str
-   ├─ description: str                ├─ description: str
-   ├─ input_schema: dict (JSON Schema) ├─ args_schema: type[BaseModel]
-  调用：await session.call_tool(name, args)  调用：await tool.ainvoke(args)
-  返回：CallToolResult(content=[...])        返回：str / Any
+  MCP SDK 侧                              LangChain / langgraph 侧
+  ─────────────                           ──────────────────────
+  mcp.types.Tool                          langchain_core.tools.BaseTool
+   ├─ name: str                            ├─ name: str
+   ├─ description: str | None              ├─ description: str
+   ├─ input_schema: dict (JSON Schema)      ├─ args_schema: dict（独立深拷贝）
+  await session.call_tool(name, arguments)  await tool.ainvoke(arguments)
+  CallToolResult(content=[...], is_error=...) → str 或异常
 ```
 
-| 差异 | 根因 | 破坏点 |
+当前 SDK 的 Python 属性是 `Tool.input_schema`，`inputSchema` 是协议序列化别名。构造、访问和回归测试以安装版本的真实 SDK 类型为准，不靠 `SimpleNamespace` 掩盖字段名错误。
+
+| 差异 | 桥的处理 | 边界 |
 |---|---|---|
-| schema 格式不同 | MCP 面向动态类型 JSON；LangChain 面向静态类型 Python | langgraph 用 `args_schema` 生成 function-calling 喂 LLM，拿不到就不知道要什么参数 |
-| 调用接口不同 | MCP 通过 session 调，LangChain 通过对象方法调 | agent 编排层是 LangChain 的 `create_react_agent`，它只认 `BaseTool` |
-| 返回结构不同 | MCP 支持多模态 content block，LangChain 通常期望字符串 | 不归一会在喂 LLM 上下文时炸 |
+| 参数契约传递 | 将原始 `input_schema` 深拷贝给 `args_schema` | 保留约束和空 `{}`，不做 JSON Schema → Pydantic 参数模型转换 |
+| 调用接口 | 公开 `ainvoke(arguments)` 进入 `_arun`，校验后调 SDK `call_tool` | 非法参数不能到达 MCP server；同步 `invoke` 禁用 |
+| 返回结构 | 识别真实 `CallToolResult` / `TextContent`，归一为字符串或 `ToolException` | 当前不是多模态输出适配器 |
 
-桥的使命：让 langgraph 以为这些 MCP tool 就是普通的 LangChain tool，无缝接入 react agent。
+桥仍是 `create_agent` 可使用的 `BaseTool` 包装器；registry 仍负责发现、缓存与连接管理。修改参数契约不意味着合并两者职责。
 
 ### 6.2 桥做三件事
 
-1. **参数 schema 翻译**：MCP 的 `inputSchema`（JSON Schema dict）→ pydantic `BaseModel`（LangChain 的 `args_schema`）。
-2. **调用转发**：`await tool.ainvoke(**kwargs)` → `await session.call_tool(name, kwargs)`。
-3. **结果归一**：MCP 返回 `CallToolResult.content` 是一组 content block（text/image/…），LangChain 期望字符串。把 text block 拼起来。
+1. **保留并校验参数契约**：`args_schema=deepcopy(tool.input_schema)`，不以 `schema or {...}` 替换空 `{}`。包装时检查 schema 合法性，调用时显式用 `jsonschema` 校验参数。
+2. **调用转发**：`await tool.ainvoke(arguments)` → `_arun(**arguments)` → `await session.call_tool(mcp_name, arguments)`。不隐式转换类型、不填 `default`、不丢额外属性；是否允许额外属性由 schema 决定。
+3. **结果与错误归一**：按顺序用换行拼接 `TextContent.text`；无文本时返回 `str(result)`。`is_error=True` 转 `ToolException`，网络异常原样传播。
 
-### 6.3 为什么 args_schema 必须是 pydantic model
+### 6.3 为什么选择原始 JSON Schema，而不是生成参数模型
 
-langgraph / LangChain 用 `args_schema` 生成 function-calling 的 JSON Schema 喂给 LLM。LLM 看到 tool schema 才知道"这个 tool 叫什么、要什么参数、参数什么类型"。`args_schema` 没设对，LLM 调 tool 时会传错参数。
+旧转换器只映射简单 Python 类型，会丢失 union、`enum`、嵌套约束、`$ref` 和组合关键字，也曾把必填参数变成可选（历史 B2，见[测试指南第 7 章](backend-unit-testing-guide.md#ch-7)）。仅修一个 `Field` 默认值仍不能保证 schema 保真，因此已删除旧转换函数，改为**原始 schema + 显式校验**。
+
+- **missing 与 null 是不同语义**：`required` 管「键是否存在」；`type` 管「值能否为 null」。可省略字符串字段不等于允许 `None`，nullable 的必填字段也不能省略。
+- **约束保持完整**：`enum`、`items`、嵌套 object、`$defs` / 本地 `$ref`、`oneOf` / `anyOf` / `allOf` 等仍由所选 JSON Schema 方言解释，不手工压缩成单个 Python 类型。
+- **schema 是快照**：深拷贝隔离 SDK tool 和调用方后续修改；空 `{}` 是合法、无约束的 schema，必须原样保留。
+- **Pydantic 没有被全项目弃用**：它仍是 `BaseTool` 包装器、API 请求/响应模型与 settings 的基础。`ConfigDict(arbitrary_types_allowed=True)` 只允许 `ClientSession` 作为任意类型字段，并不会取消该字段的实例类型检查。
+
+原始 schema 传递保真不等于任意 LLM provider 都支持所有关键字；provider 的 function-calling 限制需要单独验证，不能通过删约束或静默降级解决。
 
 ---
 
 <a id="ch-7"></a>
 ## 第 7 章 桥的参考实现
 
-文件放 `src/tokendanceai/mcp/bridge.py`。
+完整实现以 [mcp/bridge.py](../src/tokendanceai/mcp/bridge.py) 为准。本章对照真实代码讲清包装期与调用期各自的契约；运行依赖 `jsonschema` 与 `referencing`（见 `pyproject.toml`）。
+
+### 7.1 实现与关键点
+
+桥的全部逻辑在 `MCPToolWrapper` 一个类里：`model_post_init` 负责包装期的 schema 快照与校验器构建，`_arun` 负责调用期的参数校验、转发与结果归一。
 
 ```python
-from __future__ import annotations
-from typing import Any
-from langchain_core.tools import BaseTool
-from mcp import ClientSession
-from mcp.types import Tool as MCPTool
-from pydantic import BaseModel, ConfigDict, Field, create_model
-
-
-# ─── JSON Schema → pydantic model ────────────────────────────────────
-
-def _json_type_to_py(t: str | list[str] | None) -> type:
-    """JSON Schema type string → Python type。MCP 的 type 可能是 union（list）。"""
-    if t is None:
-        return str
-    types = t if isinstance(t, list) else [t]
-    mapping = {
-        "string": str, "integer": int, "number": float,
-        "boolean": bool, "array": list, "object": dict, "null": type(None),
-    }
-    py_types = [mapping.get(x, str) for x in types if x != "null"]
-    if not py_types:
-        return str
-    return py_types[0]  # 简化：只取第一个，复杂 schema 后续再优化
-
-
-def _schema_to_model(mcp_tool: MCPTool) -> type[BaseModel]:
-    """把 MCP tool 的 inputSchema 转成 pydantic model，给 LangChain 用。"""
-    schema = mcp_tool.inputSchema or {"type": "object", "properties": {}}
-    props: dict[str, Any] = schema.get("properties", {})
-    required = set(schema.get("required", []))
-    fields: dict[str, Any] = {}
-    for fname, fdef in props.items():
-        py_type = _json_type_to_py(fdef.get("type", "string"))
-        desc = fdef.get("description", "")
-        if fname in required:
-            fields[fname] = (py_type, Field(..., description=desc))
-        else:
-            fields[fname] = (py_type | None, Field(default=None, description=desc))
-    return create_model(f"{mcp_tool.name}_Args", **fields)
-
-
-# ─── 单个 MCP tool 的 LangChain 包装 ────────────────────────────────
-
+# mcp/bridge.py（对照真实实现）
 class MCPToolWrapper(BaseTool):
-    """把一个 MCP tool 包成 LangChain BaseTool。持有对 MCP ClientSession 的引用。"""
-
-    # BaseTool 是 pydantic model；ClientSession 不是 pydantic 类型，
-    # 要开 arbitrary_types_allowed 才能作为字段
+    """保留 MCP 原始 JSON Schema，适配 LangChain 的调用与结果接口。"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     mcp_name: str
     mcp_description: str = ""
-    session: ClientSession
+    session: ClientSession                     # 真实 SDK 类型，不用 Protocol/替身放宽
+    _validator: Validator = PrivateAttr()
 
-    def _run(self, **kwargs: Any) -> Any:
-        raise NotImplementedError("MCP tools are async-only, use ainvoke()")
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        if not isinstance(self.args_schema, dict):          # 只收 dict schema
+            raise TypeError("MCP tools require a JSON Schema dictionary")
+        self.args_schema = deepcopy(self.args_schema)       # 快照，隔离 SDK/调用方后续修改
+        dialect = self.args_schema.get("$schema")
+        if "$schema" in self.args_schema and not isinstance(dialect, str):
+            raise SchemaError("JSON Schema dialect must be a string")
+        validator_cls = validator_for(self.args_schema, default=Draft202012Validator)
+        if dialect is not None:                             # 声明的方言必须被支持，不静默回退
+            supported = validator_cls.META_SCHEMA.get("$id", validator_cls.META_SCHEMA.get("id", ""))
+            if dialect.rstrip("#") != supported.rstrip("#"):
+                raise SchemaError("Unsupported JSON Schema dialect")
+        validator_cls.check_schema(self.args_schema)        # 非法 schema 在包装期就炸，不拖到首次调用
+        self._validator = validator_cls(self.args_schema, registry=Registry())  # 空 registry：只解析本地 $ref
+
+    def _run(self, **kwargs: Any) -> str:
+        raise NotImplementedError("MCP tools are async-only. Please use ainvoke().")
 
     async def _arun(self, **kwargs: Any) -> str:
+        try:
+            self._validator.validate(kwargs)                # 校验在远调之前，非法参数不出网络
+        except ValidationError as exc:
+            raise ToolException(f"Invalid arguments for {self.mcp_name}: {exc.message}") from exc
+        except Unresolvable as exc:                          # 包装期合法、引用却不可解析，在这里才暴露
+            raise ToolException(f"Unresolvable JSON Schema reference for {self.mcp_name}") from exc
+
         result = await self.session.call_tool(self.mcp_name, kwargs)
-        texts = [
-            block.text for block in result.content
-            if getattr(block, "type", None) == "text"
-        ]
-        return "\n".join(texts) if texts else str(result)
-
-
-# ─── 批量包装 ────────────────────────────────────────────────────────
-
-def wrap_mcp_tools(session: ClientSession, mcp_tools: list[MCPTool]) -> list[BaseTool]:
-    """把 MCP session 列出的 tools 全部包成 LangChain BaseTool。"""
-    tools: list[BaseTool] = []
-    for t in mcp_tools:
-        args_model = _schema_to_model(t)
-        tools.append(MCPToolWrapper(
-            name=t.name,
-            description=t.description or "",
-            mcp_name=t.name,
-            mcp_description=t.description or "",
-            session=session,
-            args_schema=args_model,
-        ))
-    return tools
+        if not isinstance(result, CallToolResult):          # 非预期结果不当成功
+            raise ToolException(f"Unexpected MCP result for {self.mcp_name}")
+        texts = [b.text for b in result.content if isinstance(b, TextContent)]
+        output = "\n".join(texts) if texts else str(result)
+        if result.is_error:                                 # 协议级错误转异常，不伪装成文本
+            raise ToolException(f"MCP tool {self.mcp_name} failed: {output}")
+        return output
 ```
 
-### 7.1 关键点理解
+**包装期**要守住的三条：
 
-1. **`args_schema` 必须是 pydantic model**：langgraph 用它生成 function-calling JSON Schema 喂 LLM。
-2. **`_run` 抛 `NotImplementedError`**：MCP 是异步协议，强行同步没意义。
-3. **`arbitrary_types_allowed=True`**：`session: ClientSession` 不是 pydantic 原生类型，必须开这个开关，否则实例化报 `PydanticUserError`。
-4. **结果归一只取 text block**：MCP tool 可能返回图片、资源引用，但喂给 LLM 上下文时通常只关心文字。后续要支持多模态，这里改成返回结构化 `ToolMessage` content。
+- **类型不放水**：`session` 是真实 `ClientSession`，`args_schema` 只接受 `dict`。布尔 schema、Pydantic 参数模型都不是本桥的输入契约。
+- **方言显式**：无 `$schema` 默认 Draft 2020-12；声明了就必须与所选校验器的 `META_SCHEMA` 匹配，否则 `SchemaError`，绝不静默降级到未知方言。
+- **错在包装期，不拖到调用期**：`check_schema` 让非法 schema 在建 tool 时就失败，而不是等第一次网络调用。（例外：本地 `$ref` 的可解析性要到调用校验真正走到它时才知道，所以空 `Registry()` 只保证不发起远程下载。未配 format checker，不承诺 `format` 验证。）
 
-### 7.2 与真实实现的两处差异（待修复）
+**调用期**要守住的三条：
 
-上面是**目标实现**；真实 [mcp/bridge.py](../src/tokendanceai/mcp/bridge.py) 有两处需要对齐：
+- **先校验、后远调**：`validate()` 失败（`ValidationError` / `Unresolvable`）直接 `ToolException`，`call_tool` 根本不执行——非法参数到不了 MCP server。
+- **只校验、不清洗**：`"3"` 不会被转成 `3`，省略的字段不补 `default`；额外属性是否放行完全由 schema 决定。
+- **结果如实归一**：按顺序换行拼接 `TextContent`，无文本时回退 `str(result)`；`is_error=True` 或非 `CallToolResult` 一律转 `ToolException`，不把失败粉饰成正常字符串。同步入口 `_run` 直接禁用，调用方只能走 `ainvoke` / `astream`。
 
-| # | 真实代码 | 目标 | 影响 |
-|---|---|---|---|
-| 1 | `mcp_tool.input_schema`（第 39 行） | 取决于 SDK 版本 | 当前 MCP python SDK 的字段是 `inputSchema`（驼峰）。若运行报 `AttributeError: input_schema`，说明 SDK 用驼峰，需改回 `inputSchema`。**落地前务必对当前 SDK 版本验证一次** |
-| 2 | required 分支用 `Field(default=None, ...)`（第 47 行） | `Field(..., ...)` | **功能性 bug**：required 字段也给了默认值 `None`，于是没有任何字段是真正必填的。LLM 漏传必填参数时，pydantic 不报错，错误被推迟到 MCP server 端，报错信息更难懂 |
+### 7.2 与真实实现对齐的使用示例与回归契约
 
-**#2 的修复**（让 required 真正必填）：
+下面是可在项目环境中运行的最小示例：包装器、SDK 消息都是真实类型，只有网络 session 用 SDK autospec 替身。
 
 ```python
-if fname in required:
-    fields[fname] = (py_type, Field(..., description=desc))         # ... = 必填
-else:
-    fields[fname] = (py_type | None, Field(default=None, description=desc))
+import asyncio
+from unittest.mock import create_autospec
+
+from langchain_core.tools import ToolException
+from mcp import ClientSession
+from mcp.types import CallToolResult, TextContent, Tool
+
+from tokendanceai.mcp.bridge import wrap_mcp_tools
+
+
+async def demo():
+    session = create_autospec(ClientSession, instance=True, spec_set=True)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="done")]
+    )
+    tool = wrap_mcp_tools(session, [Tool(
+        name="draft", description="Create a draft",
+        input_schema={
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+        },
+    )])[0]
+
+    try:
+        await tool.ainvoke({})
+    except ToolException:
+        session.call_tool.assert_not_awaited()
+    else:
+        raise AssertionError("missing title must fail before network I/O")
+
+    assert await tool.ainvoke({"title": "hello"}) == "done"
+    session.call_tool.assert_awaited_once_with("draft", {"title": "hello"})
+
+
+if __name__ == "__main__":
+    asyncio.run(demo())
 ```
 
-**架构理由**：schema 翻译层是 agent 和 LLM 之间的「契约边界」。契约在这里失真（必填变可选），下游（LLM → MCP server）全程带病运行，排查成本成倍放大。边界层的正确性优先级最高。
+历史 B2 已由「原始 schema + 显式 JSON Schema 校验」修复，回归测试不再对旧转换函数写 `xfail`。完整测试见 [tests/test_bridge.py](../tests/test_bridge.py)，教学矩阵见[测试指南第 7 章](backend-unit-testing-guide.md#ch-7)：schema 快照/空 schema、missing vs null、union/enum/nested/local ref/组合、同步禁用、调用转发、文本/fallback、协议错误和网络异常。
+
+桥只借用 session，不建立或关闭连接——发现/包装失败后的新连接清理由 registry 负责（[第 9 章](#ch-9)）。这些单测覆盖参数契约，不触及真实 SDK 的跨任务生命周期（见 [9.3 已知限制](#ch-9-limits)）。
 
 ---
 
@@ -893,155 +901,122 @@ async def build_agent(...):
         return agent  # 💥 async with 退出 → session 断开，agent 拿到的 tools 全部失效
 ```
 
-### 9.2 正确写法：封装"活的 client"
+### 9.2 缓存活动 client
 
-> 该模块已落地为 [mcp/registry.py](../src/tokendanceai/mcp/registry.py)，下面的结构与真实代码一致（真实代码里 `decrypt_token` 还是占位 `_decrypt_token`，见 9.4）。
+正解是把活连接缓存起来，用 `AsyncExitStack` 持有它的退出栈，而不是让 `async with` 在建完 agent 后立刻拆掉连接。一个 `_LiveClient` 封装一条活连接；`MCPRegistry` 按 `(user_id, server_name)` 缓存这些连接。实现见 [mcp/registry.py](../src/tokendanceai/mcp/registry.py)，完整单测见 [tests/test_registry.py](../tests/test_registry.py)。
 
 ```python
 # mcp/registry.py（对照真实实现）
-from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from mcp import ClientSession
-from tokendanceai.mcp.bridge import wrap_mcp_tools
-from tokendanceai.mcp.client import connect_http, connect_sse  # 第 8 章的三种 transport
-# token 解密见 mcp/config.py（9.4），这里假设已有 decrypt_token(cfg) 返回明文 Bearer token
-
-
 @dataclass
 class _LiveClient:
-    """一个 MCP server 的活动连接。管建连、关闭、缓存 tool 列表。"""
+    """一个 MCP server 的活连接：持有 session、退出栈和已包装的 tool。"""
     session: ClientSession
-    _stack: AsyncExitStack       # 持有 connect_* 的 async with 栈，用于优雅关闭
-    tools_cache: list = field(default_factory=list)
+    _stack: AsyncExitStack          # connect_* 的 async with 栈，close 时逆序释放
+    tools_cache: list[BaseTool] = field(default_factory=list)
     last_used: datetime = field(default_factory=datetime.now)
 
     async def close(self) -> None:
-        # 退出 AsyncExitStack → 按栈顺序逆序释放 session → transport → http_client
-        await self._stack.aclose()
+        await self._stack.aclose()  # session → transport → http_client 逆序关闭
 
 
 class MCPRegistry:
-    """per-user MCP client 缓存，带 TTL，server config 变更时失效。"""
-
-    def __init__(self, cache_ttl: int = 300):
-        self._clients: dict[tuple[int, str], _LiveClient] = {}  # (user_id, server_name) → live
+    def __init__(self, cache_ttl: int = 300) -> None:
+        self._clients: dict[tuple[int, str], _LiveClient] = {}
         self._ttl = timedelta(seconds=cache_ttl)
 
-    async def get_tools(self, user_id: int, server_configs: list) -> list:
-        tools = []
-        for cfg in server_configs:
-            if not cfg.enabled:
-                continue
-            live = await self._get_or_build(user_id, cfg)
-            tools.extend(live.tools_cache)
-        return tools
-
-    async def _get_or_build(self, user_id: int, cfg) -> _LiveClient:
+    async def _get_or_build(self, user_id: int, cfg: MCPServerConfig) -> _LiveClient:
         key = (user_id, cfg.name)
         live = self._clients.get(key)
+
+        # 命中且未过期：刷新空闲计时后复用（空闲 TTL，不是连接硬上限）
         if live and datetime.now() - live.last_used < self._ttl:
             live.last_used = datetime.now()
             return live
-        # 不存在或过期 → 新建：用 AsyncExitStack.enter_async_context 持有
-        # mcp.client.connect_http/sse/stdio（第 8 章），让连接长生命周期存活
+
+        # 过期：先关旧连接、成功后再删缓存项——顺序颠倒会在 close 失败时丢掉句柄
+        if live is not None:
+            await live.close()
+            del self._clients[key]
+
+        # 建连 → 发现 → 包装，全程成功才写入缓存
         live = await self._build_live(cfg)
-        mcp_tools = (await live.session.list_tools()).tools
-        live.tools_cache = wrap_mcp_tools(live.session, mcp_tools)
+        try:
+            mcp_tools = (await live.session.list_tools()).tools
+            live.tools_cache = wrap_mcp_tools(session=live.session, mcp_tools=mcp_tools)
+        except BaseException:
+            await live.close()   # 含取消：失败的新连接必须关闭，绝不入缓存
+            raise
         self._clients[key] = live
         return live
-
-    async def _build_live(self, cfg) -> _LiveClient:
-        """按 cfg.transport 建连，用 AsyncExitStack 持有，让 session 长生命周期存活。
-
-        关键：connect_* 是 @asynccontextmanager，必须用 stack.enter_async_context
-        进栈，而不是 `async with`——前者把连接的生命周期绑到 stack 上，
-        stack 不 aclose() 连接就不关，正是 per-user 缓存要的"活的 client"。
-        建连途中任何异常都要先 aclose() 栈，否则半开的 transport 泄漏。
-        """
-        stack = AsyncExitStack()
-        try:
-            token = decrypt_token(cfg.encrypted_api_token)  # 9.4 解密
-            if cfg.transport == "http":
-                session = await stack.enter_async_context(
-                    connect_http(cfg.url, token)
-                )
-            elif cfg.transport == "sse":
-                session = await stack.enter_async_context(
-                    connect_sse(cfg.url, token)
-                )
-            elif cfg.transport == "stdio":
-                # stdio 需要 command/args，MCPServerConfig 暂无对应字段；
-                # 接本地 server 时再扩 cfg + connect_stdio（第 8 章）
-                raise NotImplementedError("stdio transport 暂未支持")
-            else:
-                raise ValueError(f"未知 transport: {cfg.transport}")
-        except BaseException:
-            await stack.aclose()  # 建连失败：关栈防泄漏；成功则交给 _LiveClient.close()
-            raise
-        return _LiveClient(session=session, _stack=stack)
-
-    async def invalidate(self, user_id: int) -> None:
-        """server config 改完调，关掉该 user 所有 client，下次重建。"""
-        keys = [k for k in self._clients if k[0] == user_id]
-        for k in keys:
-            await self._clients[k].close()
-            del self._clients[k]
 ```
 
-### 9.3 设计要点
+三处关键顺序，每一处都对应一类泄漏：
 
-1. **per-user 缓存**：key 是 `(user_id, server_name)`，不同 user 的 token 不同，client 不能共享。
-2. **TTL 过期重建**：避免长期持有陈旧连接；TTL 到了下次 `get_tools` 自动重建。
-3. **`invalidate(user_id)`**：用户改了 url/token/启停，必须调这个把该 user 的 client 全部 close，否则用旧连接。
-4. **tools 缓存**：`list_tools()` 不是免费操作（一次网络往返），缓存下来避免每次 agent run 都重查。
-5. **`enabled=False` 跳过**：软关停不删配置，registry 加载时直接跳过。
+- **先验 TTL 再复用**，命中时刷新 `last_used`。TTL 是**空闲计时**——连接只要还在用就一直续命，闲置超过 `cache_ttl` 才回收。
+- **替换旧连接时，先 `close()` 再 `del`**。反过来会在关闭抛错时把管理句柄一起丢掉，连接泄漏。
+- **发现/包装成功后才入缓存**，失败路径（含 `asyncio.CancelledError`，所以捕获 `BaseException`）一律 `close()`。半建成的连接绝不进缓存。
 
-### 9.4 token 解密：`_decrypt_token` 待补
+桥只借用 session 引用，连接的建、关、缓存全归 registry。两者职责清晰分工，不因参数契约换成原始 JSON Schema 而变动。
 
-真实 [mcp/registry.py:20](../src/tokendanceai/mcp/registry.py#L20) 的 `_decrypt_token` 仍是占位实现——**有 token 就抛 `NotImplementedError`**，逼着落地时把解密补上：
+### 9.3 设计要点与已知限制
+
+已经落实的三条设计约束：
+
+1. **per-user 缓存**：按 `(user_id, server_name)` 建键，不同用户的 token 与连接互不共享；`enabled=False` 直接跳过，返回的 tools 按配置顺序聚合。
+2. **tools 随连接缓存**：命中时不重复 `list_tools()`，省掉每轮对话的网络发现。
+3. **写后失效**：url / token / 启停任一改动，由接口层调 `invalidate(user_id)` 关闭并清除该用户全部连接，杜绝继续走旧连接。
+
+<a id="ch-9-limits"></a>
+> **已知限制（贯穿第 7–9 章的同一条边界）**：当前实现验证的是**缓存、聚合、参数校验与本地资源清理**；它**不**保证真实 SDK 连接的跨任务生命周期安全。SDK 的 transport / session 运行在 AnyIO 的 task group 和 cancel scope 内，在请求任务 A 里进入的上下文，不能假定能在另一个请求任务或 shutdown 任务里干净退出——`AsyncExitStack` 只搬运退出回调，不转移取消域的所有权，跨任务关闭可能抛取消域退出错误。单测用 autospec session + 无真实 transport 的 `AsyncExitStack` + `AsyncMock` 回调，只覆盖本地清理分支，不启动 dispatcher、不进入真实取消域。**要落生产，还需要三项独立设计**：① 所有者任务（owner task）统一持有连接的进入与退出；② 并发建连/失效/调用的竞争控制；③ 缓存键纳入完整配置身份（同名 server 的不同 url/token/版本）。这三项连同真实 SDK 集成测试，是本设计尚未覆盖的部分。此后各处提到「生命周期尚未验证」，均指这一条。
+
+### 9.4 建连与失效：`_build_live` 与 `invalidate`
+
+`_build_live` 负责解密 token、按 transport 建连，并用 `AsyncExitStack` 把连接的生命周期从 `async with` 块里「拎出来」交给缓存持有；`invalidate` 则在配置变更时逐个关闭并清除某用户的全部连接。
 
 ```python
-def _decrypt_token(encrypted: str | None) -> str | None:
-    if not encrypted:
-        return None
-    raise NotImplementedError("token 解密未实现，见 mcp/config.py（教材 9.4）")
+async def _build_live(self, cfg: MCPServerConfig) -> _LiveClient:
+    stack = AsyncExitStack()
+    try:
+        token = decrypt(cfg.encrypted_api_token)   # 只在建连时解密一次
+        assert token
+        if cfg.transport == "http":
+            session = await stack.enter_async_context(connect_http(url=cfg.url, token=token))
+        elif cfg.transport == "sse":
+            session = await stack.enter_async_context(connect_sse(url=cfg.url, token=token))
+        else:
+            raise NotImplementedError(f"transport not supported: {cfg.transport!r}")
+    except BaseException:
+        await stack.aclose()   # 建连途中失败/取消：关掉已入栈的部分再抛
+        raise
+    return _LiveClient(session=session, _stack=stack)
+
+async def invalidate(self, user_id: int) -> None:
+    for k in [k for k in self._clients if k[0] == user_id]:
+        await self._clients[k].close()
+        del self._clients[k]
 ```
 
-补齐方案：复用已有的 [utils/crypto.py](../src/tokendanceai/utils/crypto.py)（Fernet），不要另起炉灶：
+- **解密时机唯一**：`encrypted_api_token` 的明文只在建连这一刻出现，塞进 `Authorization` 头后即丢，不缓存、不落库、不进日志或异常消息。LLM key 与 MCP token 共用 [utils/crypto.py](../src/tokendanceai/utils/crypto.py) 的同一套 Fernet，无需单独的 `mcp/config.py`。
+- **`enter_async_context` 是关键**：它把 `connect_*` 的 `async with` 语义转交给 `stack`，于是连接能活过 `_build_live` 的返回，直到 `_LiveClient.close()` 才释放。
+- **一处待加固**：`assert token` 在 `python -O` 下会被整行移除。生产应改成显式的条件异常（`if not token: raise ...`），不要依赖断言做凭据校验。
 
-```python
-# mcp/registry.py 顶部
-from tokendanceai.utils.crypto import decrypt
-
-def _decrypt_token(encrypted: str | None) -> str | None:
-    if not encrypted:
-        return None
-    return decrypt(encrypted)   # 用 settings.ai_encryption_key 解出明文 Bearer token
-```
-
-**架构理由**：加密/解密是一对，必须用同一把钥匙、同一套实现。LLM key 已经走 `utils/crypto.py`（见 [services/llm_service.py](../src/tokendanceai/services/llm_service.py)），MCP token 再写一套 Fernet 就有两处要维护、两处可能配错钥匙。凭据处理收敛到**单一模块**是安全系统的基本纪律。
-
-> 真实 `_build_live` 里有 `assert token`（第 85 行）：解出来是 `None` 会直接 `AssertionError`。生产环境关 assert（`python -O`）时这行会被优化掉，建议落地时换成显式 `if token is None: raise ...`。
+> 真实 SDK 连接的跨任务关闭安全性，见 [9.3 已知限制](#ch-9-limits)——`_build_live`/`invalidate` 的本地清理分支可测，但不等同于验证了生产生命周期。
 
 ### 9.5 mcp/ 包的演进规划
 
-MCP 基础设施已独立成 `mcp/` 包，按代码膨胀程度分阶段填模块：
-
 ```
 mcp/
-  bridge.py       # ✅ 已实现：MCP tool → LangChain BaseTool 的桥（第 7 章）
-  client.py       # ✅ 已实现：三种 transport connect_http/sse/stdio（第 8 章）
-  registry.py     # ✅ 已实现：per-user 缓存 + TTL（9.2）
-  config.py       # ⬜ 待补：token 解密收敛处（9.4）；也可直接复用 utils/crypto
-  discovery.py    # ⬜ 可选：test_connectivity（连通性测试，见 12.8 的 /test 端点）
+  bridge.py       # 原始 JSON Schema + 显式校验 + SDK 结果适配（第 7 章）
+  client.py       # 三种 transport connect_http/sse/stdio（第 8 章）
+  registry.py     # per-user 缓存、空闲 TTL、invalidate 与失败清理
+  discovery.py    # 可选：后续抽出独立的连通性探测
 ```
 
-**tool 爆炸的应对（规模上限）**：当前 `get_tools` 全量注入所有 enabled server 的 tool。几十个 tool 没问题；上百个时会撑爆 prompt、拖慢决策。届时的演进路径（v2）：按 server 分组做两级检索（先选 server 再选 tool）、或引入 tool 的向量检索。v1 不做（[1.3 非目标](#ch-1)），但接口留好了——`get_tools` 是唯一入口，改它不影响上层。
+registry 目前只支持 http / sse 建连——`connect_stdio` 已备好，但未接入配置路径。跨任务生命周期与并发安全属于 registry 层的后续工作（见 [9.3](#ch-9-limits)），不靠扩大 bridge 的职责来解决。
 
-### 9.5 Tool 数量爆炸的风险
+### 9.6 Tool 数量爆炸的风险
 
-通用 agent 的主要风险是 tool 数量爆炸。v1 直接全量注入（几十个 tool 没问题）；后续做 dynamic tool loading——加一个 `search_tools(query)` meta-tool，按需 retrieve top-k，避免 context 膨胀。
+当前全量注入 enabled server 的 tool。几十个 tool 可用，上百个可能撑大 prompt、拖慢决策；v2 可先选 server 再选 tool，或加入 `search_tools(query)` 按需检索。`get_tools` 保留为唯一入口，v1 不实现动态检索。
 
 ---
 
@@ -1491,20 +1466,7 @@ python -c "from tokendanceai.db.base import Base; from tokendanceai.db.db_sessio
 
 **(3) token 解密实现**
 
-`mcp/registry.py:_decrypt_token` 目前还抛 `NotImplementedError`。补齐逻辑：
-
-```python
-# mcp/config.py（新建文件）
-from tokendanceai.utils.crypto import decrypt
-
-def decrypt_mcp_token(encrypted: str | None) -> str | None:
-    """解密 MCPServerConfig.encrypted_api_token → 明文 Bearer token。"""
-    if not encrypted:
-        return None
-    return decrypt(encrypted)  # 复用 utils/crypto.py 里的 Fernet 解密
-```
-
-然后把 `registry.py` 的 `_decrypt_token` 改成调这个。`encrypted_api_token` 和 `encrypted_api_key` 用同一套 Fernet 密钥（`settings.ai_encryption_key`），所以解密函数可以共享。
+已在 `MCPRegistry._build_live` 直接调用 `utils.crypto.decrypt`，与 LLM key 复用同一套 Fernet；无需新增 `mcp/config.py` 或实现旧占位函数。仍需独立验证解密/transport 错误路径与 `assert token` 的生产校验问题（见 9.4）。
 
 **(4) MCPRegistry 全局单例**
 
@@ -1536,7 +1498,7 @@ def get_registry() -> MCPRegistry:
     return _registry
 ```
 
-router 里 `registry: MCPRegistry = Depends(get_registry)` 拿到同一个实例。
+router 里 `registry: MCPRegistry = Depends(get_registry)` 拿到同一个实例。此处只讲装配；shutdown 任务能否安全关闭请求任务建立的连接，属于 [9.3 的已知限制](#ch-9-limits)。真实实现见 [mcp/registry.py](../src/tokendanceai/mcp/registry.py)。
 
 **(5) 鉴权依赖 `get_current_user`**
 
@@ -2064,7 +2026,7 @@ async def update_server(
     return ServerPublic.model_validate(server)
 ```
 
-**设计点**：**部分更新语义**——`PATCH` 只更新传了的字段，`None` 的不动。这样前端「只改 enabled」时不需要重传 name/url/token。**token 重加密**——`data.api_token` 非空时，用新明文重新 `encrypt()`。旧密文被覆盖，解密后是新 token。**软启停**——`enabled=False` 时 server 配置还在，只是 `MCPRegistry.get_tools` 跳过（见 `registry.py:59`）。删配置用 DELETE，停用用 PATCH `enabled=false`。
+**设计点**：**部分更新语义**——`PATCH` 只更新传了的字段，`None` 的不动。这样前端「只改 enabled」时不需要重传 name/url/token。**token 重加密**——`data.api_token` 非空时，用新明文重新 `encrypt()`。旧密文被覆盖，解密后是新 token。**软启停**——`enabled=False` 时 server 配置还在，只是 `MCPRegistry.get_tools` 跳过（见 [registry.py 的 get_tools](../src/tokendanceai/mcp/registry.py)）。删配置用 DELETE，停用用 PATCH `enabled=false`。
 
 #### (4) `DELETE /servers/{id}` —— 删除 MCP server 配置
 
@@ -2255,7 +2217,7 @@ app.include_router(account.router)
 
 - [ ] 数据库五张表已建表（User / UserLLMConfig / MCPServerConfig / Session / Message）。
 - [ ] `models/model.py` 里的 `Update_at` 字段已改成 `updated_at`。
-- [ ] `mcp/registry.py:_decrypt_token` 已实现（调 `utils.crypto.decrypt`）。
+- [x] `MCPRegistry._build_live` 直接复用 `utils.crypto.decrypt`。
 - [ ] `main.py` 里 `MCPRegistry` 已注册为全局单例（`lifespan` + `get_registry`）。
 - [ ] `get_current_user` 依赖已实现（JWT 解析 + 查 User）。
 - [ ] `schemas/` 里所有 `*Public` / `*Create` / `*Update` 已定义（见 12.4）。
@@ -2266,7 +2228,7 @@ app.include_router(account.router)
 - [ ] 所有资源访问接口都校验了 `resource.user_id == current_user.id`（防水平越权）。
 - [ ] 所有响应 schema 都不含 `encrypted_*` 字段（密文永不出库）。
 
-全部打勾之后，接口层就是生产可用的——能对外服务、有鉴权、密文不泄露、缓存失效机制正确。下一章（第 13 章）讲 autopilot 怎么在 system prompt 层面实现自动发布。
+全部打勾，说明接口功能清单已就绪——但这是功能层面的就绪，不等于生产可靠。MCP 连接的跨任务退出、并发与缓存键仍须按 [9.3](#ch-9-limits) 独立加固。下一章讲 autopilot 的 prompt 策略。
 
 ---
 
@@ -2345,8 +2307,8 @@ v1 的对话是「一次性 run」，没有 checkpoint 持久化，上 `interrup
 每一步独立验证，别一次写完才测——MCP 协议细节多，堆到最后 debug 很痛。
 
 1. **先 `uv add mcp`**，写一个独立脚本连一个公开 MCP server（或自建 fastmcp server），手动 `list_tools()` / `call_tool()` 跑通。**先不碰 LangChain**，确认能连、能调。
-2. **写 `mcp/bridge.py`**，把上一步的 tool 包成 `BaseTool`，用一个简单 LLM 调一次试试。
-3. **写 `mcp/registry.py` 的 `MCPRegistry`**，先支持单一 transport（http），把 per-user + TTL 做出来。
+2. **写 `mcp/bridge.py`**，保留原始 JSON Schema、包装时检查 schema、调用前显式校验；先跑 [test_bridge.py](../tests/test_bridge.py)，再验证实际 provider 的 tool-calling 兼容性。
+3. **写 `MCPRegistry`**，验证 per-user 缓存/空闲 TTL/invalidate 与失败清理；[test_registry.py](../tests/test_registry.py) 只证明本地分支，真实 SDK 任务所有权、并发和缓存键另行设计/集成验证。
 4. **接 langgraph**，跑通"用户消息 → agent 调 MCP tool → 返回"闭环。
 5. 再加 SSE / stdio transport、多 server、`invalidate`、连通性测试接口。
 
@@ -2401,12 +2363,12 @@ v1 之后，都用 langgraph 原生能力扩展：
 <a id="appendix-a"></a>
 ## 附录 A. 已知坑点清单
 
-- **`arbitrary_types_allowed=True`**：`MCPToolWrapper` 里存 `ClientSession` 字段必须开，否则 pydantic 报 `PydanticUserError`。
-- **`__aenter__` / `__aexit__` 配对**：第 8 章手动 `__aenter__()` 进去的连接，close 时必须调 `__aexit__(None, None, None)`，否则底层 httpx 连接不释放。`_LiveClient.close()` 就是干这个。
+- **`arbitrary_types_allowed=True`**：让 Pydantic 支持真实 SDK `ClientSession` 字段，仍进行实例类型检查，不接受随意鸭子类型替身。测试使用 SDK autospec；Pydantic 仍支撑 BaseTool 与 API 模型。
+- **上下文配对与任务所有权**：第 8 章用 `async with`，registry 用 `AsyncExitStack.enter_async_context` / `aclose`。退出回调配对只保证单任务内释放，不等于能跨任务退出真实 AnyIO 取消域——所有者任务与真实生命周期验证仍待做，见 [9.3](#ch-9-limits)。
 - **`session.initialize()`**：建完 `ClientSession` 必须先 `await session.initialize()` 才能调别的，否则报 `RuntimeError: Server not initialized`。
-- **JSON Schema nested / union 类型**：`_schema_to_model` 是简化版，不处理 `$ref` / `oneOf` / 嵌套 object。复杂 tool schema 会丢字段。遇到再增强——用 `pydantic.TypeAdapter` 解析或直接用 langchain 的 `convert_to_openai_function` 兼容路径。
-- **tool name 冲突**：不同 MCP server 可能有同名 tool。`MCPToolWrapper.name` 加 server 前缀（如 `blog__create_post_draft`）可避免。
-- **async-only**：MCP 工具不能同步调。langgraph 的 `create_react_agent` 默认走 async 路径，没问题；但如果某处代码走 `agent.invoke()`（同步）会触发 `_run` 抛 `NotImplementedError`。确保入口都是 `astream` / `ainvoke`。
+- **原始 JSON Schema 契约**：深拷贝保留 nested / union / enum / 本地 `$ref` / 组合与空 `{}`，包装阶段 `check_schema`，调用阶段显式校验；不转换、不加 default、不丢额外属性。只支持本地引用，触及不可解析/远程引用时 `ToolException` 且不远调；不配置 format checker，不承诺 `format` 断言。
+- **tool name / 缓存键冲突**：不同 server 同名 tool 可考虑本地名前缀，保留原 `mcp_name` 转发；当前未实现自动前缀。同名配置的缓存键、配置版本及并发竞争也仍待改。
+- **async-only**：MCP 工具不能同步调。`create_agent` 应由异步入口驱动，没问题；但如果某处代码走 `agent.invoke()`（同步）会触发 `_run` 抛 `NotImplementedError`。确保入口都是 `astream` / `ainvoke`。
 - **连接超时**：MCP server 挂了/网络断了，`session.call_tool` 会 hang。包一层 `asyncio.wait_for(..., timeout=30)`，超时给用户友好错误。
 - **token 解密时机**：`MCPServerConfig.encrypted_api_token` 解密**只在建 client 时**做一次，解密后的明文**不缓存、不进日志、不进异常消息**。
 - **MCPServerConfig.user_id 不能 unique**：一个用户要能配多个 server，`unique=True` 会限制成只能一个。只能 `index=True`。
@@ -2421,8 +2383,8 @@ v1 之后，都用 langgraph 原生能力扩展：
 | `MultiServerMCPClient` | `MCPRegistry`（第 9 章） |
 | `client.get_tools()` | `registry.get_tools(user, configs)`（内部 `session.list_tools()` + `wrap_mcp_tools`） |
 | `MultiServerMCPClient` 内部 transport 适配 | 第 8 章三个 `connect_*` 函数 |
-| 自动 JSON Schema → BaseTool | `_schema_to_model`（第 7 章） |
-| 自动 close | `_LiveClient.close()` |
+| 自动 JSON Schema → BaseTool | `wrap_mcp_tools` / `MCPToolWrapper`，原始 schema 深拷贝 + 显式 jsonschema 校验（第 7 章） |
+| 自动 close | `_LiveClient.close()` / AsyncExitStack；真实 SDK 跨任务安全尚未验证 |
 
 当你发现自己的 `MCPRegistry` 越来越像 `MultiServerMCPClient`，且要处理的边界情况（重连、协议版本、schema 兼容）越来越多时，就是该考虑切回 adapters 包的信号——**不是为了偷懒，是因为那些边界情况它已经踩过坑了**。
 
@@ -2434,7 +2396,7 @@ v1 之后，都用 langgraph 原生能力扩展：
 | MCP | Model Context Protocol，Anthropic 提出的开放协议，让 LLM 客户端标准调用外部 tool |
 | transport | MCP 通信方式：http / sse / stdio |
 | BaseTool | LangChain 的工具抽象基类，langgraph agent 用的 tool 必须继承它 |
-| args_schema | BaseTool 的参数 schema（pydantic model），langgraph 用它生成 function-calling JSON Schema 喂 LLM |
+| args_schema | BaseTool 支持 Pydantic 模型类或 JSON Schema dict；MCP 桥使用原始 dict 深拷贝，另做显式参数校验 |
 | ClientSession | MCP SDK 的客户端会话，持有连接、list_tools / call_tool 的入口 |
 | _LiveClient | 自写的"MCP server 活动连接"封装，管建连/关闭/缓存 tool |
 | MCPRegistry | per-user MCP client 缓存，带 TTL + invalidate |

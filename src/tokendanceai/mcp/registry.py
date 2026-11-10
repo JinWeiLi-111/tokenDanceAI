@@ -59,9 +59,19 @@ class MCPRegistry:
             live.last_used = datetime.now()
             return live
 
+        if live is not None:
+            # 过期的连接不能在替换后脱离资源管理。
+            await live.close()
+            del self._clients[key]
+
         live = await self._build_live(cfg)
-        mcp_tools = (await live.session.list_tools()).tools
-        live.tools_cache = wrap_mcp_tools(session=live.session, mcp_tools=mcp_tools)
+        try:
+            mcp_tools = (await live.session.list_tools()).tools
+            live.tools_cache = wrap_mcp_tools(session=live.session, mcp_tools=mcp_tools)
+        except BaseException:
+            # 发现/包装成功后才把资源所有权交给缓存，取消也须清理。
+            await live.close()
+            raise
         self._clients[key] = live
         return live
 
@@ -90,7 +100,7 @@ class MCPRegistry:
         return _LiveClient(session=session, _stack=stack)
 
     async def invalidate(self, user_id: int) -> None:
-        """server config 修改之后调用, 关闭 user_id 关联的所有 client并删除缓存, 下次重建"""
+        """配置修改后关闭该用户的所有连接并删除缓存，下次访问时重建。"""
         keys = [k for k in self._clients if k[0] == user_id]
         for k in keys:
             await self._clients[k].close()

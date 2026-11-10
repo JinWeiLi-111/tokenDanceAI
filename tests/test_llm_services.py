@@ -35,3 +35,21 @@ def test_build_anthropic_model():
 def test_unknown_provider_model():
     with pytest.raises(ValueError, match="unknown provider"):
         build_chat_model(_make_config("deepseek"))
+
+
+def test_api_key_is_decrypted_before_use(monkeypatch):
+    import tokendanceai.services.llm_service as svc
+
+    capture = {}
+
+    def _fake_decrypt(ciphertext: str) -> str:
+        capture["ciphertext"] = ciphertext
+        return "sk-decrypted"
+
+    monkeypatch.setattr(svc, "decrypt", _fake_decrypt)
+
+    cfg = _make_config("openai")
+    model = build_chat_model(cfg)
+
+    assert capture["ciphertext"] == cfg.encrypted_api_key
+    assert model.openai_api_key.get_secret_value() == "sk-decrypted"  # pyright: ignore[reportAttributeAccessIssue]

@@ -1,11 +1,11 @@
 # 后端单元测试设计文档
 
-> **文档性质**：TokenDance AI 后端的单元测试设计文档（Testing Design Doc）。既讲清「单元测试是什么、这个项目该测什么」（方法论），也给出「每一层具体怎么写」的落地参考（实现）。所有测试代码片段均对照 `src/tokendanceai/` 的真实实现，并标注哪些测试会**抓到当前代码里真实存在的 bug**。
+> **文档性质**：TokenDance AI 后端的单元测试设计文档（Testing Design Doc）。既讲方法论，也给逐层落地参考。MCP 章节（第 7–8 章）已按原始 JSON Schema 契约落地，并链接到真实 tests；其余分层给出设计示例与待办清单，照着补即可。
 >
 > | 项 | 值 |
 > |---|---|
-> | 文档版本 | v1 |
-> | 状态 | 待落地（后端已完成，测试从零搭建） |
+> | 文档版本 | v2（MCP 原始 JSON Schema 与 SDK mock 契约同步） |
+> | 状态 | crypto/auth/LLM/MCP 单测已落地；其余分层保留实施指南 |
 > | 适用系统 | `tokendanceai`（FastAPI + SQLAlchemy async + langgraph + MCP） |
 > | 目标读者 | 本项目后端开发者，需具备 Python async、FastAPI、pytest 基础认知即可 |
 > | 关联代码 | `src/tokendanceai/`、`pyproject.toml` |
@@ -27,7 +27,7 @@
 - [第 3 部分 分层测试实战（对照真实代码）](#part-3)
   - [第 5 章 基础层：crypto 加密](#ch-5)
   - [第 6 章 服务层：auth 认证](#ch-6)
-  - [第 7 章 能力层：bridge 桥（会抓到必填参数 bug）](#ch-7)
+  - [第 7 章 能力层：bridge 桥（原始 JSON Schema 与 B2 回归）](#ch-7)
   - [第 8 章 能力层：registry 缓存](#ch-8)
   - [第 9 章 编排层：memory 存取对称](#ch-9)
   - [第 10 章 编排层：runner 与 SSE（mock 外部依赖）](#ch-10)
@@ -48,7 +48,7 @@
 
 ### 现状
 
-后端五大模块——数据模型、MCP 桥接、agent 编排、认证、HTTP 接口——代码都写完了，能跑起来。但「能跑起来」和「正确」是两回事。现在整个 `src/` 目录下**没有一行测试**，验证全靠手动点 Swagger 或前端点一遍。这种验证有三个致命问题：
+后端五大模块——数据模型、MCP 桥接、agent 编排、认证、HTTP 接口——代码都写完了，能跑起来。但「能跑起来」和「正确」是两回事。最初缺少自动化测试，只能手动点 Swagger/前端；如今 `tests/` 已有 crypto/auth/LLM/MCP 回归，仍需继续覆盖其余分层与真实 SDK 集成。单靠手工验证有三个致命问题：
 
 1. **覆盖不全**：手动只会走「正常路径」。空参数、过期 token、禁用的 server、解密失败这些分支，没人会一个个手点。
 2. **不可重复**：改完一处代码，没法一键确认「别的地方没被改坏」。回归全靠记忆。
@@ -62,15 +62,15 @@
 
 ### 这份文档不空谈——先看三个现成的 bug
 
-为了证明测试不是走形式，我在通读代码时顺手找到了三个**此刻就存在**的 bug，它们都能被一个几行的单元测试当场抓住：
+三个真实 bug，测试都能在合并前抓到。其中 B2 已修复并转为正式回归，B1/B3 仍待修（对应测试已写好）：
 
 | # | 位置 | bug | 后果 | 哪个测试抓到 |
 |---|---|---|---|---|
 | B1 | [schemas/session.py:11](../src/tokendanceai/schemas/session.py#L11) | `SessionPublic.create_at` 字段名拼错，模型里是 `created_at` | `GET /api/sessions` 直接 500，会话列表页全崩 | [第 11 章](#ch-11) |
-| B2 | [mcp/bridge.py:47](../src/tokendanceai/mcp/bridge.py#L47) | 必填参数也给了 `default=None`，导致「必填」形同虚设 | LLM 漏传必填参数不报错，错误被推到 MCP server 端 | [第 7 章](#ch-7) |
+| B2 | [mcp/bridge.py](../src/tokendanceai/mcp/bridge.py) | **历史已修复**：旧参数模型转换使必填失效 | 原始 JSON Schema + 显式校验拒绝缺失参数，不远调 | [第 7 章](#ch-7)，正式回归无 xfail |
 | B3 | [schemas/agent.py:7](../src/tokendanceai/schemas/agent.py#L7) | `autopoilt: bool` 拼写错误且为必填，但路由根本没用它 | 前端不传这个字段，`POST /api/agent/run` 直接 422 | [第 11 章](#ch-11) |
 
-这三个 bug 现在都「静静地躺着」，手动测试很可能漏掉 B2（要构造特定参数才触发），而 B1/B3 会让对应接口完全不可用。**测试的价值，就是让这类问题在你合并代码前五秒钟就红灯报警，而不是上线后收用户投诉。** 完整清单见[附录 A](#appendix-a)。
+手动测试很可能漏掉 B2（要专门构造缺失参数才触发），现在它由正式回归守护；B1/B3 的测试也已写好，等代码修复后转绿。**测试的价值，就是让这类问题在你合并代码前五秒钟就红灯报警，而不是上线后收用户投诉。** 完整清单见[附录 A](#appendix-a)。
 
 ### 文档的两条线
 
@@ -146,8 +146,8 @@ async def test_decrypt_recovers_original_plaintext():
 
 TokenDance AI 有三个特征，让它比普通 CRUD 应用更需要测试：
 
-1. **全链路异步**：`async/await` 到处都是。异步代码的 bug（忘了 `await`、session 生命周期错配、`expire_on_commit` 踩坑）用肉眼极难发现，但一个测试就能暴露。
-2. **大量外部依赖**：LLM、MCP server 都是网络外部系统。没有 mock，你根本没法稳定地验证「当 MCP server 返回这个 schema 时，桥翻译得对不对」。
+1. **全链路异步**：`async/await` 到处都是。异步代码的 bug（忘了 `await`、session 生命周期错配、`expire_on_commit` 踩坑）用肉眼极难发现，但有针对性的单测或真实组件集成测试能提前暴露；mock 单测不能证明真实 SDK 的跨任务生命周期。
+2. **大量外部依赖**：LLM、MCP server 都是网络外部系统。没有 mock，你根本没法稳定地验证「MCP schema 是否保真传递、非法参数是否在远调前拒绝」。
 3. **安全敏感**：加密、JWT、per-user 隔离、token 脱敏——这些地方错一点就是安全事故。它们恰恰是最适合单元测试的纯逻辑（见[第 5–6 章](#ch-5)）。
 
 ---
@@ -161,7 +161,7 @@ TokenDance AI 有三个特征，让它比普通 CRUD 应用更需要测试：
 
 | 优先级 | 特征 | 本项目对应 |
 |---|---|---|
-| 🔴 最高 | 有分支逻辑 + 安全/数据相关 | `verify_access_token`、`_schema_to_model`、registry 缓存/TTL、路由的归属校验 |
+| 🔴 最高 | 有分支逻辑 + 安全/数据相关 | `verify_access_token`、bridge schema 保真/显式校验、registry 缓存/TTL/失败关闭、路由的归属校验 |
 | 🟠 高 | 有分支逻辑，纯计算 | `build_chat_model` 的 provider 分支、memory 的 load/save 对称 |
 | 🟡 中 | 有状态但逻辑简单 | 各 CRUD 路由的正常路径 + 错误码 |
 | ⚪ 低 | 无分支、纯声明 | ORM 字段定义、Pydantic schema 字段（但**字段名错配要测**，见 B1/B3） |
@@ -179,7 +179,7 @@ TokenDance AI 有三个特征，让它比普通 CRUD 应用更需要测试：
           │ agents/  │   │ services/│      → 第 9/10 章 + 第 6 章
           └────┬─────┘   └────┬─────┘
                ▼              │
-  能力层   ┌──────────┐       │             → 第 7/8 章：桥的 schema 翻译、registry 缓存
+  能力层   ┌──────────┐       │             → 第 7/8 章：桥的原 schema/显式校验、registry 缓存
           │  mcp/    │       │
           └────┬─────┘       │
                ▼             ▼
@@ -197,7 +197,7 @@ TokenDance AI 有三个特征，让它比普通 CRUD 应用更需要测试：
 | 基础 | `utils/crypto.py` | 加解密往返、密文不等于明文、篡改检测 | [第 5 章](#ch-5) |
 | 服务 | `services/auth.py` | 密码哈希、JWT 签发/验证/过期、`get_current_user` 的 401/404 | [第 6 章](#ch-6) |
 | 服务 | `services/llm_service.py` | provider 分支、解密调用、未知 provider 报错 | [第 6 章](#ch-6) |
-| 能力 | `mcp/bridge.py` | JSON Schema → pydantic、必填/可选、结果归一 | [第 7 章](#ch-7) |
+| 能力 | `mcp/bridge.py` | 原始 JSON Schema 保真、显式校验、missing/null、结果/错误 | [第 7 章](#ch-7) |
 | 能力 | `mcp/registry.py` | 缓存命中、TTL 过期、`invalidate`、`enabled` 跳过 | [第 8 章](#ch-8) |
 | 编排 | `agents/memory.py` | load/save 对称、tool_call 还原 | [第 9 章](#ch-9) |
 | 编排 | `agents/runner.py` | SSE 事件格式、落库时机、只转发 agent 节点 | [第 10 章](#ch-10) |
@@ -227,7 +227,7 @@ TokenDance AI 有三个特征，让它比普通 CRUD 应用更需要测试：
 
 ### 3.1 要装什么
 
-项目现在**一个测试库都没装**（`pyproject.toml` 的 `dev` 组只有 `ruff`）。需要补三个：
+项目 `dev` 组已包含 pytest、pytest-asyncio、ruff，且 pytest 配置已就位；以下是从空环境搭建时的参考命令，无需重复添加已安装依赖：
 
 ```bash
 uv add --dev pytest pytest-asyncio
@@ -249,7 +249,7 @@ uv add --dev pytest pytest-asyncio
 
 ### 3.2 pyproject.toml 配置
 
-在 `pyproject.toml` 追加 pytest 配置段：
+项目 `pyproject.toml` 已有下列 pytest 配置；新项目可按此添加：
 
 ```toml
 [tool.pytest.ini_options]
@@ -272,7 +272,7 @@ tokenDanceAI/
     conftest.py              # ★ 全局 fixture（第 4 章），pytest 自动加载
     test_crypto.py           # → utils/crypto.py（第 5 章）
     test_auth.py             # → services/auth.py（第 6 章）
-    test_llm_service.py      # → services/llm_service.py（第 6 章）
+    test_llm_services.py      # → services/llm_service.py（第 6 章）
     test_bridge.py           # → mcp/bridge.py（第 7 章）
     test_registry.py         # → mcp/registry.py（第 8 章）
     test_memory.py           # → agents/memory.py（第 9 章）
@@ -681,7 +681,7 @@ async def test_get_current_user_returns_user(db, test_user):
 ### 6.5 llm_service 测试代码
 
 ```python
-# tests/test_llm_service.py
+# tests/test_llm_services.py
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
@@ -746,300 +746,219 @@ def test_api_key_is_decrypted_before_use(monkeypatch):
 ---
 
 <a id="ch-7"></a>
-## 第 7 章 能力层：bridge 桥（会抓到必填参数 bug）
+## 第 7 章 能力层：bridge 桥（原始 JSON Schema 契约与 B2 回归）
 
-**被测对象**：[mcp/bridge.py](../src/tokendanceai/mcp/bridge.py)——JSON Schema → pydantic model 的翻译，和 MCP tool → LangChain BaseTool 的包装。这是 agent 和 LLM 之间的**契约边界**，[系统设计文档 7.2](general-agent-textbook.md) 已明确指出这里有 bug。
+**被测对象**：[mcp/bridge.py](../src/tokendanceai/mcp/bridge.py) 的 `MCPToolWrapper` / `wrap_mcp_tools`。桥保留原始 JSON Schema、显式校验调用参数，并适配 SDK 调用与结果；不再生成 Pydantic 参数模型。设计依据见[系统设计文档第 6–7 章](general-agent-textbook.md#ch-6)，完整可执行测试见 [tests/test_bridge.py](../tests/test_bridge.py)。
 
 ### 7.1 该测什么
 
-| 函数 | 测试点 |
-|---|---|
-| `_json_type_to_pydantic_model` | 各 JSON 类型映射正确；`None`→str；union 取第一个非 null；未知类型→str |
-| `_schema_to_model` | 字段齐全；**必填字段真的必填**（🔴 这里有 bug）；可选字段可省 |
-| `MCPToolWrapper._arun` | 调用转发给 session；只取 text block 并拼接；无 text 时 fallback |
-| `MCPToolWrapper._run` | 抛 `NotImplementedError`（MCP 是 async-only） |
-| `wrap_mcp_tools` | 批量包装，name/description/args_schema 都对 |
+| 契约 | 正常/边界输入 | 必须断言 |
+|---|---|---|
+| schema 保真 | 完整嵌套 schema、空 `{}`、缺失 description、多 tool | `args_schema == input_schema` 且不是同一对象；嵌套对象也隔离；修改源 schema 不影响包装器；空 `{}` 不替换；metadata / session 正确 |
+| 包装时校验 | dict schema；非 dict（包括布尔 schema、Pydantic 模型）；非法 schema | 非 dict 不接受（进入 `model_post_init` 后 `TypeError`）；非法 schema 精确抛 `SchemaError`，不远调 |
+| 方言选择 | 无 `$schema`、受支持的显式方言、未知方言 | 无声明使用 Draft 2020-12；声明按 `validator_for` 支持的方言解释；未知方言 `SchemaError`，不回退 |
+| missing vs null | 必填字符串缺失/为 null；必填 nullable 缺失/为 null；可选非 nullable 缺失/为 null | 缺失由 `required` 决定，null 由类型决定；拒绝时 `ToolException` 且 `call_tool.assert_not_awaited()` |
+| union / enum | 多种允许类型、null、枚举内外的值 | 不只接受 union 第一种类型，不丢 enum；无字符串到数字的隐式转换 |
+| nested / array | 内层必填、类型、`items`、数量/数值等约束 | 嵌套非法输入同样在本地拒绝，不只测顶层字段存在 |
+| 本地引用 / 组合 | `$defs` / 本地 `$ref`；`oneOf` / `anyOf` / `allOf` | 本地引用与组合约束生效，`oneOf` 的多分支同时匹配也应拒绝 |
+| 引用边界 | 缺失本地引用、远程 `$ref` | 无法解析的引用转 `ToolException` 且不远调；空 `referencing.Registry()` 不检索远程资源 |
+| 不改参数 | 类型不符、schema 的 `default`、允许/禁止额外属性 | 不转换、不补默认值；允许的额外属性原值转发，禁止的额外属性拒绝 |
+| 同步禁用 | 公开 `tool.invoke({})` | 精确 `NotImplementedError` 且 session 未 await |
+| 调用转发 | 公开 `tool.ainvoke(arguments)`、本地名字不同于 `mcp_name` | 精确 `assert_awaited_once_with(mcp_name, arguments)` |
+| 结果归一 | 真实 `CallToolResult` + `TextContent` / 非 text 内容、空 content | 仅文本按顺序换行拼接；无文本等于 `str(result)` fallback |
+| 错误边界 | `is_error=True`、非预期结果、SDK / 网络异常 | 协议错误和非预期结果精确 `ToolException`；网络异常原样传播，且远调次数正确 |
 
-### 7.2 测试代码（含抓 bug 的用例）
+**两个失败时机，分别断言**——这是本章测试的主轴：
+
+- **包装期失败（`SchemaError`）**：`model_post_init` 只收 dict schema，选好 validator 后 `check_schema`。非法 schema、未知方言在建 tool 时就炸，根本走不到网络。
+- **调用期失败（`ToolException`）**：`_arun` 里 `validate(kwargs)` 不过（参数非法，或 `$ref` 不可解析触发 `Unresolvable`）就抛 `ToolException`，且断言 `call_tool.assert_not_awaited()`。注意 `check_schema` 通过不代表所有引用都能解析——空 `Registry()` 只解析本地 `$ref`、不发远程下载，所以合法 schema 仍可能在这一步才暴露引用缺失。
+
+两条易错点：显式 `$schema` 必须是字符串且与所选 `META_SCHEMA` 的 `$id`/`id`（去尾 `#`）匹配；未配 format checker，所以不要断言 `format` 行为，也不要拿 Pydantic 的参数 `ValidationError` 代替 JSON Schema 校验异常。
+
+下表描述桥**应当**守护的完整契约。实际覆盖以 [tests/test_bridge.py](../tests/test_bridge.py) 为准——矩阵是目标清单，不是「每项都已验证」的结论。
+
+### 7.2 代表性测试（可独立执行）
+
+将下段保存为一个 pytest 文件即可在项目环境运行；使用 SDK autospec，不依赖额外自定义 fixture。完整用例以 [tests/test_bridge.py](../tests/test_bridge.py) 为准，不在文档复制整份测试。
 
 ```python
-# tests/test_bridge.py
+from copy import deepcopy
+from unittest.mock import create_autospec
+
 import pytest
-from mcp.types import Tool as MCPTool
-from pydantic import ValidationError
+from jsonschema.exceptions import SchemaError
+from langchain_core.tools import ToolException
+from mcp import ClientSession
+from mcp.types import CallToolResult, TextContent, Tool
 
-from tokendanceai.mcp.bridge import (
-    MCPToolWrapper,
-    _json_type_to_pydantic_model,
-    _schema_to_model,
-    wrap_mcp_tools,
-)
+from tokendanceai.mcp.bridge import wrap_mcp_tools
 
 
-# ---------- 类型映射 ----------
-@pytest.mark.parametrize("json_type,py_type", [
-    ("string", str), ("integer", int), ("number", float),
-    ("boolean", bool), ("array", list), ("object", dict),
-])
-def test_json_type_mapping(json_type, py_type):
-    assert _json_type_to_pydantic_model(json_type) is py_type
+def make_tool(schema):
+    session = create_autospec(ClientSession, instance=True, spec_set=True)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="hello"),
+                 TextContent(type="text", text="world")]
+    )
+    source = Tool(name="demo", description="d", input_schema=schema)
+    return session, source, wrap_mcp_tools(session, [source])[0]
 
 
-def test_none_type_defaults_to_str():
-    assert _json_type_to_pydantic_model(None) is str
-
-
-def test_union_type_takes_first_non_null():
-    """type 是 list（union）时，取第一个非 null 类型。"""
-    assert _json_type_to_pydantic_model(["string", "null"]) is str
-    assert _json_type_to_pydantic_model(["integer", "null"]) is int
-
-
-def test_unknown_type_falls_back_to_str():
-    assert _json_type_to_pydantic_model("weird-type") is str
-
-
-# ---------- schema → model ----------
-def _tool_with_schema(schema: dict) -> MCPTool:
-    return MCPTool(name="demo", description="d", inputSchema=schema)
-
-
-def test_schema_to_model_has_all_fields():
+def test_schema_snapshot_preserves_nested_constraints():
     schema = {
         "type": "object",
-        "properties": {"title": {"type": "string"}, "count": {"type": "integer"}},
+        "properties": {"title": {"type": "string", "enum": ["hello"]}},
         "required": ["title"],
     }
-    Model = _schema_to_model(_tool_with_schema(schema))
-    fields = Model.model_fields
-    assert "title" in fields and "count" in fields
+    expected = deepcopy(schema)
+    _, source, tool = make_tool(schema)
+    assert tool.args_schema == expected
+    assert tool.args_schema is not source.input_schema
+    assert tool.args_schema["properties"] is not source.input_schema["properties"]
+    source.input_schema["properties"]["title"]["enum"].append("changed")
+    assert tool.args_schema == expected
 
 
-def test_optional_field_can_be_omitted():
-    """可选字段不传，应该能通过校验。"""
-    schema = {"type": "object", "properties": {"note": {"type": "string"}}, "required": []}
-    Model = _schema_to_model(_tool_with_schema(schema))
-    Model()   # 不传 note，不应报错
-
-
-@pytest.mark.xfail(reason="已知 bug B2: bridge.py:47 给必填字段设了 default=None，导致必填失效", strict=True)
-def test_required_field_is_actually_required():
-    """
-    ★ 这个测试会抓到真实 bug（见附录 A 的 B2）。
-    schema 声明 title 必填，省略 title 实例化时就应该 ValidationError。
-    但当前 bridge.py:47 对 required 分支也写了 Field(default=None, ...)，
-    于是 title 变成可选，下面的 pytest.raises 不会触发 → 测试失败。
-    修复 bridge.py:47 为 Field(..., description=desc) 后，去掉 xfail 即转绿。
-    """
-    schema = {
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{}, {"title": None}, {"title": 3}])
+async def test_invalid_arguments_fail_before_network(arguments):
+    session, _, tool = make_tool({
         "type": "object",
         "properties": {"title": {"type": "string"}},
         "required": ["title"],
-    }
-    Model = _schema_to_model(_tool_with_schema(schema))
-    with pytest.raises(ValidationError):
-        Model()   # 必填的 title 没给，应该炸
+    })
+    with pytest.raises(ToolException, match="Invalid arguments"):
+        await tool.ainvoke(arguments)
+    session.call_tool.assert_not_awaited()
 
 
-# ---------- 包装器 ----------
-async def test_wrapper_run_is_sync_forbidden():
-    """MCP 是 async-only，同步 _run 必须抛 NotImplementedError。"""
-    wrapper = MCPToolWrapper(
-        name="t", description="d", mcp_name="t", session=_FakeSession(),
-    )
-    with pytest.raises(NotImplementedError):
-        wrapper._run()
+@pytest.mark.asyncio
+async def test_valid_arguments_preserve_extras_and_omit_defaults():
+    session, _, tool = make_tool({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "count": {"type": "integer", "default": 10},
+        },
+        "required": ["title"],
+    })
+    arguments = {"title": "hello", "extra": {"keep": True}}
+    assert await tool.ainvoke(arguments) == "hello\nworld"
+    session.call_tool.assert_awaited_once_with("demo", arguments)
 
 
-async def test_wrapper_arun_joins_text_blocks():
-    """_arun 应把 MCP 返回的 text block 拼成一个字符串。"""
-    wrapper = MCPToolWrapper(
-        name="t", description="d", mcp_name="remote_tool", session=_FakeSession(),
-    )
-    out = await wrapper._arun(x=1)
-    assert out == "hello\nworld"       # FakeSession 返回两个 text block
+def test_empty_schema_is_not_replaced_and_sync_is_forbidden():
+    session, _, tool = make_tool({})
+    assert tool.args_schema == {}
+    with pytest.raises(NotImplementedError, match="async-only"):
+        tool.invoke({})
+    session.call_tool.assert_not_awaited()
 
 
-def test_wrap_mcp_tools_sets_names():
-    tools = wrap_mcp_tools(
-        session=_FakeSession(),
-        mcp_tools=[MCPTool(name="foo", description="bar", inputSchema={"type": "object", "properties": {}})],
-    )
-    assert len(tools) == 1
-    assert tools[0].name == "foo"
-    assert tools[0].description == "bar"
-    assert tools[0].args_schema is not None
+def test_invalid_schema_fails_at_wrapping():
+    session = create_autospec(ClientSession, instance=True, spec_set=True)
+    source = Tool(name="bad", input_schema={"type": "not-a-json-type"})
+    with pytest.raises(SchemaError):
+        wrap_mcp_tools(session, [source])
+    session.call_tool.assert_not_awaited()
 ```
 
-### 7.3 FakeSession：mock 掉 MCP 网络连接
+### 7.3 SDK autospec：mock 网络，不伪造类型契约
 
-`_arun` 会调 `self.session.call_tool(...)`，这是真实网络请求。测试里用一个**假 session** 顶替，返回预设结果：
+生产字段仍为 `session: ClientSession`。`arbitrary_types_allowed=True` 允许 Pydantic 为 SDK 类型建立实例检查，**不允许随意鸭子类型实例通过校验**。测试必须使用 `create_autospec(ClientSession, instance=True, spec_set=True)`：异步方法成为带签名检查的 mock，未知属性赋值会失败，且能符合 SDK 实例检查。不要删除生产类型、改成局部 `Protocol` 或给随手写的 session 加 `type: ignore` 来绕过问题。
 
-```python
-# tests/test_bridge.py（接上）
-from types import SimpleNamespace
+输入/输出使用真实 `mcp.types.Tool`、`CallToolResult`、`TextContent`；registry 的发现结果使用真实 `ListToolsResult`。当前 SDK 的 Python 属性为 `input_schema` / `is_error`，协议别名为 `inputSchema` / `isError`。这让字段、结果类型和 SDK 升级不兼容真正进入测试，而不是被 `SimpleNamespace` 遮住。
 
+### 7.4 要点：断言公开行为，而不是旧内部实现
 
-class _FakeSession:
-    """假的 MCP ClientSession，只实现测试需要的方法。"""
-
-    async def call_tool(self, name: str, args: dict):
-        # 模拟 MCP 返回两个 text block + 一个非 text block（应被过滤）
-        return SimpleNamespace(content=[
-            SimpleNamespace(type="text", text="hello"),
-            SimpleNamespace(type="text", text="world"),
-            SimpleNamespace(type="image", data="..."),   # 非 text，_arun 应忽略
-        ])
-
-    async def list_tools(self):
-        return SimpleNamespace(tools=[])
-```
-
-> **注意**：`MCPToolWrapper.session` 的类型标注是 `ClientSession`，但 pydantic 开了 `arbitrary_types_allowed=True`（见 [bridge.py:58](../src/tokendanceai/mcp/bridge.py#L58)），所以传一个鸭子类型的 `_FakeSession` 不会被校验拦下。这正是「面向接口而非实现」带来的可测性。
-
-> **关于 `input_schema` vs `inputSchema`**：[系统设计文档 7.2](general-agent-textbook.md) 担心 `bridge.py:39` 的 `mcp_tool.input_schema` 可能因 SDK 用驼峰而报 `AttributeError`。我对当前安装的 `mcp>=2.3.0` 实测确认：**Python 属性名就是 `input_schema`（下划线），`inputSchema` 只是它的序列化别名**。所以 `bridge.py:39` 在当前版本是**对的**，不会报错。测试里构造 `MCPTool(..., inputSchema={...})` 用别名赋值 pydantic 也接受。但这一点**依赖 SDK 版本**——正因如此更要有测试：哪天升级 SDK 改了字段名，`test_schema_to_model_has_all_fields` 会立刻变红，而不是等到运行时才炸。
-
-### 7.4 要点：这一章最能体现测试的价值
-
-- **B2 是个「沉默的」bug**：必填参数失效，程序不会报错，只是把错误推迟到 MCP server 端，报错信息更难懂。手动测试几乎不可能发现它——你得专门构造「漏传必填参数」的场景。但一个 `test_required_field_is_actually_required` 就把它钉死了。
-- **`@pytest.mark.xfail(strict=True)` 的用法**：它声明「我知道这个测试现在会失败（因为 bug 没修）」。`strict=True` 意味着**如果哪天它意外通过了（bug 被修了），pytest 会报错提醒你**——这时你就该把 `xfail` 去掉，让它变成正式的回归测试。这是「带着已知 bug 继续开发」的专业做法：bug 被记录在案、不会被遗忘。
-- **`parametrize` 省重复**：类型映射有 6 种，用 `@pytest.mark.parametrize` 一次测完，不用写 6 个函数。
+- **B2 的修法决定了测法**：旧转换器给必填字段补默认值，缺失参数就被放行。修复不是继续打补丁，而是保留原 schema、在 `_arun` 里显式校验——所以测试断言的是「缺参数在远调前被拒」这个公开行为，旧转换函数连同它的测试一起删掉，不留 `xfail`。
+- **公开入口是 `ainvoke(arguments)`**：不要只调用 `_arun`，否则漏测 `BaseTool` 的参数解析路径。同步测试走 `invoke({})`。
+- **异常断言要精确**：用 `pytest.raises(ToolException, match=...)` / `SchemaError` / `NotImplementedError`，不要写 `pytest.raises(Exception)`。每个调用前拒绝用例都断言 `assert_not_awaited()`；协议结果错误是调用后失败，应断言远调已发生。
+- **Pydantic 仍然在**：这里只去掉 MCP schema 的有损参数模型转换；`BaseTool` 自身、API 模型和配置仍依赖 Pydantic。
 
 ---
 
 <a id="ch-8"></a>
 ## 第 8 章 能力层：registry 缓存
 
-**被测对象**：[mcp/registry.py](../src/tokendanceai/mcp/registry.py) 的 `MCPRegistry`——per-user MCP client 缓存，带 TTL 和失效。这是[系统设计文档第 9 章](general-agent-textbook.md)说的「整个系统的核心价值」，逻辑复杂（🔴）。
+**被测对象**：[mcp/registry.py](../src/tokendanceai/mcp/registry.py) 的 `MCPRegistry` / `_LiveClient`。完整测试见 [tests/test_registry.py](../tests/test_registry.py)，设计与限制见[系统设计文档第 9 章](general-agent-textbook.md#ch-9)。registry 负责发现、连接缓存与关闭；bridge 负责包装和参数校验，不互相接管职责。
 
 ### 8.1 该测什么
 
-registry 的难点是它封装了真实网络连接。测试要**绕过真连接**，专注验证缓存逻辑：
-
-| 测试点 | 为什么重要 |
+| 测试点 | 必须断言 |
 |---|---|
-| `enabled=False` 的 server 被跳过 | 软关停语义，错了会连已禁用的 server |
-| 缓存命中：同一 `(user, server)` 第二次不重建连接 | 性能核心，TTL 内复用 |
-| TTL 过期：超时后重建 | 避免陈旧连接 |
-| `invalidate(user_id)` 关闭并清除该用户所有 client | 改配置后必须失效，否则用旧连接 |
-| `invalidate` 只影响目标用户 | per-user 隔离，不能误伤别人 |
-| `get_tools` 按 server 顺序聚合 tools | 多 server 合并 |
+| `enabled=False` 跳过、空配置 | 返回空列表；不建连、不发现 tools |
+| 同一 `(user_id, server_name)` 缓存命中 | 不再 `_build_live` / `list_tools`；复用 tool 与 session；更新 `last_used` |
+| TTL 过期及边界 | 到期后重建；**旧连接关闭回调被 await**，不只断言建连两次；失败重建不保留过期缓存 |
+| 初次发现 / 包装成功 | 真实 `ListToolsResult` 的 `Tool` 被真实 bridge 包装，成功后才入缓存 |
+| `list_tools` 或包装失败 | 新连接关闭回调被 await；异常传播，失败项不缓存；非法 schema 精确 `SchemaError` |
+| `invalidate(user_id)` | 关闭并清除该用户所有 client；不影响其他用户；再次失效/空缓存可安全执行 |
+| 多 server 聚合与 per-user 隔离 | 输出顺序与 enabled 配置顺序一致；同 server 名的不同用户不共享 session |
+| `_LiveClient.close()` | 真实 `AsyncExitStack` 注册的异步关闭回调被 await |
+
+过期时先关闭、成功后再删缓存，避免关闭失败时丢掉管理句柄。这些用例覆盖缓存命中、TTL、失效与失败清理等本地分支；真实 SDK 的跨任务生命周期不在其列（见 [8.3](#ch-8)）。
 
 ### 8.2 测试策略：在边界处打桩
 
-`_get_or_build` 内部调 `_build_live`（真建连）和 `session.list_tools()`（真网络）。最干净的测法是**替换 `_build_live`**——它是「真实外部世界」的唯一入口。替换掉它，上面所有缓存逻辑都能纯内存测。
+缓存单测替换 `_build_live`，但不再返回虚假 session/stack。使用 SDK autospec session、真实 `ListToolsResult` / `Tool` 和一个**无真实 transport 的 `AsyncExitStack`**，给它注册 `AsyncMock` 关闭回调。这样既遵守生产类型，也能验证清理路径。`list_tools` 也是网络边界，必须配置它的返回值。
+
+下面是可独立放入 pytest 文件的代表性失效用例（配置在内存构造，不读 DB；项目测试环境按第 4 章提供配置）。
 
 ```python
-# tests/test_registry.py
-from datetime import datetime, timedelta
-from types import SimpleNamespace
+from contextlib import AsyncExitStack
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
+from mcp import ClientSession
+from mcp.types import ListToolsResult, Tool
 
 from tokendanceai.mcp.registry import MCPRegistry, _LiveClient
 from tokendanceai.models.model import MCPServerConfig
 
 
-def _cfg(name: str, enabled: bool = True, transport: str = "http") -> MCPServerConfig:
-    """构造一个未入库的 server config（纯对象）。"""
-    return MCPServerConfig(
-        user_id=1, name=name, url=f"http://{name}", transport=transport,
-        encrypted_api_token="x", enabled=enabled,
+@pytest.mark.asyncio
+async def test_invalidate_closes_cached_client(monkeypatch):
+    session = create_autospec(ClientSession, instance=True, spec_set=True)
+    session.list_tools.return_value = ListToolsResult(tools=[
+        Tool(name="blog_tool", description="d", input_schema={}),
+    ])
+    closed = AsyncMock()
+    stack = AsyncExitStack()  # 没有真实 SDK / AnyIO 上下文
+    stack.push_async_callback(closed)
+    live = _LiveClient(session=session, _stack=stack)
+    build = AsyncMock(return_value=live)
+    registry = MCPRegistry(cache_ttl=300)
+    monkeypatch.setattr(registry, "_build_live", build)
+    cfg = MCPServerConfig(
+        user_id=1, name="blog", url="http://blog/mcp", transport="http",
+        encrypted_api_token="unused-in-this-test", enabled=True,
     )
 
+    try:
+        tools = await registry.get_tools(user_id=1, server_configs=[cfg])
+        again = await registry.get_tools(user_id=1, server_configs=[cfg])
+        assert tools[0] is again[0]
+        assert tools[0].args_schema == {}
+        build.assert_awaited_once_with(cfg)
+        session.list_tools.assert_awaited_once_with()
+        closed.assert_not_awaited()
 
-class _FakeSession:
-    def __init__(self, tool_names):
-        self._tool_names = tool_names
-
-    async def list_tools(self):
-        tools = [SimpleNamespace(name=n, description="", input_schema={"type": "object", "properties": {}})
-                 for n in self._tool_names]
-        return SimpleNamespace(tools=tools)
-
-
-@pytest.fixture
-def registry_with_fake_build(monkeypatch):
-    """返回一个 registry，其 _build_live 被替换成不走网络的假实现。"""
-    reg = MCPRegistry(cache_ttl=300)
-    build_calls = []   # 记录 _build_live 被调了几次，用来验证缓存命中
-
-    async def fake_build_live(cfg):
-        build_calls.append(cfg.name)
-        # _LiveClient 需要 session 和 _stack；session 用假的，_stack 给个能 aclose 的假对象
-        session = _FakeSession(tool_names=[f"{cfg.name}_tool"])
-        fake_stack = SimpleNamespace(aclose=_noop_aclose)
-        return _LiveClient(session=session, _stack=fake_stack)   # type: ignore
-
-    monkeypatch.setattr(reg, "_build_live", fake_build_live)
-    reg._build_calls = build_calls   # 挂上去方便测试读取
-    return reg
-
-
-async def _noop_aclose():
-    return None
-
-
-# ---------- enabled 跳过 ----------
-async def test_disabled_server_is_skipped(registry_with_fake_build):
-    reg = registry_with_fake_build
-    tools = await reg.get_tools(user_id=1, server_configs=[_cfg("blog", enabled=False)])
-    assert tools == []
-    assert reg._build_calls == []   # 根本没尝试建连
-
-
-# ---------- 缓存命中 ----------
-async def test_second_call_hits_cache(registry_with_fake_build):
-    reg = registry_with_fake_build
-    cfgs = [_cfg("blog")]
-    await reg.get_tools(user_id=1, server_configs=cfgs)
-    await reg.get_tools(user_id=1, server_configs=cfgs)
-    assert reg._build_calls == ["blog"]   # 只建了一次，第二次命中缓存
-
-
-# ---------- TTL 过期重建 ----------
-async def test_expired_cache_rebuilds(registry_with_fake_build):
-    reg = registry_with_fake_build
-    cfgs = [_cfg("blog")]
-    await reg.get_tools(user_id=1, server_configs=cfgs)
-
-    # 手动把 last_used 拨到很久以前，模拟 TTL 过期
-    live = reg._clients[(1, "blog")]
-    live.last_used = datetime.now() - timedelta(seconds=10_000)
-
-    await reg.get_tools(user_id=1, server_configs=cfgs)
-    assert reg._build_calls == ["blog", "blog"]   # 过期后重建，建了两次
-
-
-# ---------- invalidate ----------
-async def test_invalidate_clears_user_clients(registry_with_fake_build):
-    reg = registry_with_fake_build
-    await reg.get_tools(user_id=1, server_configs=[_cfg("blog")])
-    assert (1, "blog") in reg._clients
-
-    await reg.invalidate(user_id=1)
-    assert (1, "blog") not in reg._clients
-
-
-async def test_invalidate_only_affects_target_user(registry_with_fake_build):
-    """per-user 隔离：invalidate(1) 不能动 user 2 的缓存。"""
-    reg = registry_with_fake_build
-    await reg.get_tools(user_id=1, server_configs=[_cfg("blog")])
-    await reg.get_tools(user_id=2, server_configs=[_cfg("blog")])
-
-    await reg.invalidate(user_id=1)
-    assert (1, "blog") not in reg._clients
-    assert (2, "blog") in reg._clients   # user 2 不受影响
+        await registry.invalidate(user_id=1)
+        closed.assert_awaited_once_with()
+        assert (1, "blog") not in registry._clients
+    finally:
+        await stack.aclose()
 ```
 
-### 8.3 要点
+TTL 用例直接将缓存项 `last_used` 拨到过去，或替换 registry 模块时钟控制精确边界；不要 `sleep`。用独立的旧/新关闭回调验证顺序与次数。失败用例在 SDK mock `list_tools.side_effect` 设置异常，或返回含非法 schema 的真实 `Tool`，让真实 `wrap_mcp_tools` 失败，验证新连接关闭且未入缓存。
 
-- **在「真实世界的唯一入口」打桩**：`_build_live` 是 registry 里唯一碰网络的地方。替换它，等于给 registry 装了个「假的外部世界」，缓存/TTL/隔离这些纯逻辑就能快速测。这是 mock 的核心思想——**在依赖的边界替换，而不是在逻辑内部**。
-- **TTL 测试靠「拨快时钟」**：不 sleep，而是直接改 `live.last_used` 到过去。时间相关逻辑一律这么测。
-- **缓存命中靠「数调用次数」**：`build_calls` 列表记录 `_build_live` 被调几次，是验证「缓存是否生效」的最直接证据。
-- **`test_invalidate_only_affects_target_user` 守护 per-user 隔离**：这是多租户系统的安全红线，必须有专门测试。
+### 8.3 要点与验证边界
 
-> **关于 `assert token` 的隐患**：[registry.py:73](../src/tokendanceai/mcp/registry.py#L73) 用了 `assert token`。[系统设计文档 9.4](general-agent-textbook.md) 指出生产环境 `python -O` 会优化掉 assert。想测这个，可以构造一个解密后为空的场景——但由于本章把 `_build_live` 整个换掉了，这条路径要单独测 `_build_live` 本身（不替换它，只 mock `decrypt` 和 `connect_http`）。属于进阶，可选。
+- **打桩不削弱生产类型**：`_LiveClient.session` 仍是 SDK `ClientSession`，`_stack` 仍为 `AsyncExitStack`。不要用 `SimpleNamespace(aclose=...)` 冒充栈，也不要往 registry 随意挂 `_build_calls` 之类测试字段；行为记录统一用 `AsyncMock.assert_awaited_*`。
+- **清理必须有断言**：缓存删除/重建的次数证明不了资源被关闭。空栈 + 关闭回调只证明 registry 走到了本地清理分支——这是单测能证明的上限。
+- **到此为止**：这些用例覆盖缓存、聚合、参数包装和本地清理，但**不触及真实 SDK 连接的跨任务生命周期**——autospec 不启动 dispatcher / transport，空栈不进入真实 AnyIO 取消域。所有者任务、并发竞争、缓存键的完整配置身份等，属于[系统设计文档 9.3 的已知限制](general-agent-textbook.md#ch-9-limits)，需真实 SDK 集成测试另行验证。
+
+> `_build_live` 已直接调 `utils.crypto.decrypt`（不再是占位函数），但里面的 `assert token` 在 `python -O` 下会被移除。解密 / transport 路径要单独测 `_build_live`、只替换它的 `decrypt` 与 transport 边界；本章这种「整体替换 `_build_live`」的缓存用例覆盖不到它。
 
 ---
 
@@ -1589,6 +1508,9 @@ async def test_upsert_account_creates_then_updates(auth_client):
 # 跑全部
 uv run pytest
 
+# 跑 MCP 契约与缓存回归（不连真实 MCP server）
+uv run pytest tests/test_bridge.py tests/test_registry.py
+
 # 跑单个文件
 uv run pytest tests/test_crypto.py
 
@@ -1667,14 +1589,14 @@ jobs:
 | **0 环境** | 装 pytest 等；写 `conftest.py`；跑通 `test_smoke.py` | 地基能用 | 环境不通，后面全白搭（第 3–4 章） |
 | **1 纯函数** | `test_crypto.py`、`test_auth.py`（JWT 部分） | 最快见绿，建立信心 | 无 async DB、无 mock，最简单（第 5–6 章） |
 | **2 带 DB** | `test_memory.py`、`test_auth.py`（get_current_user） | 验证 DB fixture 好使 | 引入 `db` fixture，但不用 mock（第 6/9 章） |
-| **3 带 mock** | `test_bridge.py`、`test_registry.py`、`test_llm_service.py` | 掌握 mock 套路 | 学会 FakeSession/monkeypatch（第 7/8 章） |
+| **3 带 mock** | `test_bridge.py`、`test_registry.py`、`test_llm_services.py` | 原 schema/错误边界、缓存与清理回归 | SDK autospec + 真实消息 + AsyncExitStack 关闭回调（第 7/8 章） |
 | **4 最难** | `test_runner.py` | 覆盖核心编排 | 依赖最多，前面铺垫够了再上（第 10 章） |
 | **5 接口** | `tests/router/*.py` | 端到端挡住 schema bug | 用前面所有 fixture，收口（第 11 章） |
 | **6 收尾** | 接 CI、看覆盖率、修 xfail 标的 bug | 持续防线 | 让测试长期有效（第 12 章） |
 
-**修 bug 的时机**：阶段 1–5 写测试时，`xfail` 标记的 B1–B5 会一路跟着。全部测试铺好后，集中修这几个 bug（都是几行的改动，见[附录 A](#appendix-a)），然后去掉对应的 `xfail`——测试套件就从「记录问题」转为「守护修复」。
+**修 bug 的时机**：B2 已修复，是「原始 schema + 显式校验」的正式回归，没有旧函数、没有 xfail。B1/B3/B5 的测试已写好，修一个、转绿一个、去掉对应的 xfail 标记即可。
 
-> **最小可行目标**：如果时间紧，先做**阶段 0 + 1 + 5**。阶段 0 搭好地基，阶段 1 覆盖安全敏感的加密和 JWT，阶段 5 用接口测试一次性挡住 schema 错配（B1/B3/B5）这类「整个接口不可用」的严重问题。这三步投入最小、挡掉的风险最大。
+> **最小可行目标**：如果时间紧，先确认**阶段 0 + 1**，守住已落地的 **MCP 阶段 3 契约回归**，再做**阶段 5**。阶段 0 搭好地基，阶段 1 覆盖安全敏感的加密和 JWT，阶段 5 用接口测试一次性挡住 schema 错配（B1/B3/B5）这类「整个接口不可用」的严重问题。这三步投入最小、挡掉的风险最大。
 
 ---
 
@@ -1684,12 +1606,12 @@ jobs:
 <a id="appendix-a"></a>
 ## A. 测试能暴露的真实 bug 清单
 
-这些是我**通读当前代码时发现的真实问题**，每个都能被本文档里的某个测试抓到。它们证明测试不是走形式——现在就有活的 bug 在等着被发现。
+下面是本文档涉及的 bug 与回归清单。B2 已修复并转为正式回归，其余为待修项（测试已写好，修复后转绿）：
 
 | # | 位置 | 问题 | 后果 | 抓它的测试 | 修复 |
 |---|---|---|---|---|---|
 | **B1** | [schemas/session.py:11](../src/tokendanceai/schemas/session.py#L11) | `SessionPublic.create_at` 字段名拼错（模型是 `created_at`） | `GET /api/sessions` 返回 500，会话列表完全不可用 | `test_list_sessions_returns_user_sessions`（11.3） | 改 `create_at` → `created_at` |
-| **B2** | [bridge.py:47](../src/tokendanceai/mcp/bridge.py#L47) | 必填字段也给 `Field(default=None)`，必填失效 | LLM 漏传必填参数不报错，错误推迟到 MCP server，难排查 | `test_required_field_is_actually_required`（7.2） | 必填分支改 `Field(..., description=desc)` |
+| **B2（历史已修复）** | [bridge.py](../src/tokendanceai/mcp/bridge.py) | 旧参数模型转换的默认值使必填失效，并有复杂 schema 丢约束风险 | 现由本地 JSON Schema 校验拒绝缺失参数，不远调 | `test_required_field_rejected_before_remote_call`（[真实 tests](../tests/test_bridge.py)） | 删除有损转换，原始 schema 深拷贝 + 显式校验；正式回归，无 xfail |
 | **B3** | [schemas/agent.py:7](../src/tokendanceai/schemas/agent.py#L7) | `autopoilt: bool` 必填且拼错，路由未使用 | 前端按常理不传 → `POST /api/agent/run` 422 | `test_agent_run_without_autopilot_field`（11.4） | 改为可选并改正拼写，或删除该字段 |
 | **B4** | [memory.py:10](../src/tokendanceai/agents/memory.py#L10) | `_ROLE_MAP` 里 `"assitant"` 拼错 | 当前未使用，暂无影响；一旦有人改用它，assistant 消息静默丢失 | `test_full_conversation_roundtrip`（9.3，若重构后触发） | 改 `"assitant"` → `"assistant"`，或删掉未用的 `_ROLE_MAP` |
 | **B5** | [schemas/server.py:17-18](../src/tokendanceai/schemas/server.py#L17) | `ServerUpdate.url`/`transport` 被设为必填，但这是部分更新接口 | 前端想只改 `enabled` 也必须带 url+transport，否则 422 | `test_update_others_server_404`（11.5，构造请求时暴露） | 两个字段改为 `Field(default=None, ...)` |
@@ -1698,7 +1620,7 @@ jobs:
 > - [schemas/session.py:21](../src/tokendanceai/schemas/session.py#L21) 的 `MessagePublic.content: str` 是必填非空，但 `Message.content` 模型层可空（Text 未标 nullable=False）。若某条 message 的 content 为 NULL，`GET /{id}/messages` 会 500。可加一个「content 为空的 message 能否正常返回」的测试探一下。
 > - [auth.py:100](../src/tokendanceai/services/auth.py#L100) 的 `get_current_admin_user` 读 `current_user.is_admin`，该字段模型里有（[model.py:29](../src/tokendanceai/models/model.py#L29)），没问题；但目前没有任何路由用到 admin 校验，属于「写了没接」。
 
-**这张表就是测试价值的最好证明**：5 个 bug，其中 B1/B3/B5 会让对应接口直接不可用，却可能在手动点测中漏过（尤其只测正常路径时）。测试让它们在合并前就暴露。
+**这张表展示测试的双重价值**：发现问题，并在修复后持续守护（B2 已是正式回归）。B1/B3/B5 则演示测试如何在修复前就把问题钉死、给出可复现的红灯。
 
 <a id="appendix-b"></a>
 ## B. 常用 mock 配方
@@ -1716,17 +1638,30 @@ def test_xxx(monkeypatch):
 
 用于：替换某模块内部调用的函数（解密、建连等）。**注意打在「使用处的模块」**，不是定义处——`llm_service.py` 里 `from ...crypto import decrypt`，就 patch `svc.decrypt`。
 
-### B.2 假的异步对象 —— 鸭子类型 class
+### B.2 MCP SDK 替身 —— autospec + 真实消息 + 真实关闭栈
 
 ```python
-class _FakeSession:
-    async def call_tool(self, name, args):
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
-    async def list_tools(self):
-        return SimpleNamespace(tools=[])
+from contextlib import AsyncExitStack
+from unittest.mock import AsyncMock, create_autospec
+
+from mcp import ClientSession
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+
+session = create_autospec(ClientSession, instance=True, spec_set=True)
+session.call_tool.return_value = CallToolResult(
+    content=[TextContent(type="text", text="ok")]
+)
+session.list_tools.return_value = ListToolsResult(tools=[
+    Tool(name="demo", input_schema={}),
+])
+closed = AsyncMock()
+stack = AsyncExitStack()  # 无真实 transport / AnyIO 上下文
+stack.push_async_callback(closed)
+# await stack.aclose() 后：closed.assert_awaited_once_with()
+# 拒绝参数后：session.call_tool.assert_not_awaited()
 ```
 
-用于：顶替 MCP `ClientSession`、langgraph agent 这类有异步方法的外部对象。只实现测试用到的方法即可。
+用于：MCP 网络边界替身，生产仍是 `ClientSession`，消息仍是真实 SDK 类型。不要用鸭子类型 session、`SimpleNamespace` 消息或伪造的 `aclose` 对象。空栈的关闭回调只验证本地清理，不覆盖真实 SDK 的跨任务生命周期（见[系统设计文档 9.3](general-agent-textbook.md#ch-9-limits)）；完整例子见第 7–8 章。
 
 ### B.3 假的异步生成器 —— `async def` + `yield`
 
@@ -1803,4 +1738,4 @@ test_get_tools_disabled_server_skipped
 
 ---
 
-> **结语**：测试的本质，是把「这段代码应该怎么工作」从你的脑子里、从口头约定里，搬到一个机器能自动、重复、永久执行的地方。这个后端已经写得不错，但「写完」和「写对且不会被改坏」之间，隔着的正是这份文档描述的测试。先跑通阶段 0+1+5，你会立刻收获三个确定性：加密安全、JWT 正确、接口不再因字段错配而崩——以及一张随时能亮红灯的回归网。
+> **结语**：测试的本质，是把「这段代码应该怎么工作」从你的脑子里、从口头约定里，搬到一个机器能自动、重复、永久执行的地方。这个后端底子不错，但「写完」和「写对且不会被改坏」之间，隔的正是这份文档描述的测试。按顺序推进——先守住加密、JWT 这些安全基础和 MCP 契约回归，再补接口测试，逐层织起回归网。记住单测的边界：它守护逻辑与契约，不替代真实 SDK 的集成验证（见第 8 章）。
